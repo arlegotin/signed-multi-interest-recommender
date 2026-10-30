@@ -1,13 +1,19 @@
-"""Deterministic spherical prototypes and exact signed/nearest-class geometry.
+"""Deterministic geometry, equally informed baseline fits, and declared grids.
 
 All computation is CPU float64. These functions consume support vectors only;
 neither prototype construction nor scoring accepts evaluation labels.
 """
 
 from dataclasses import dataclass
+import warnings
 
 import numpy as np
-from scipy.spatial.distance import cdist
+from scipy.spatial.distance import cdist, pdist
+from sklearn.linear_model import LogisticRegression
+from sklearn.svm import SVC
+
+from .data import History
+from .protocol import StudyConfig, canonical_sha256
 
 
 @dataclass(frozen=True)
@@ -152,4 +158,235 @@ def ratio_scores(X, P, N) -> np.ndarray:
         values = np.full(len(chunk), .5, dtype=np.float64)
         np.divide(dn, denominator, out=values, where=denominator != 0)
         scores[start:start + 512] = values
+    return scores
+
+
+@dataclass(frozen=True)
+class ModelConfig:
+    family: str
+    parameters: dict
+    id: str
+
+
+@dataclass(frozen=True)
+class UserModel:
+    method: str
+    parameters: dict
+    support_ids: tuple[int, ...]
+    state: dict
+    diagnostics: dict
+
+
+def initial_configurations(config: StudyConfig) -> list[ModelConfig]:
+    """All declared entries, including score-equivalent entries, in fixed order.
+
+    IDs bind family and canonical parameter values, independent of list order.
+    Centroid/PositiveMax/RocchioDirection are views of these entries only.
+    Accounting remains the caller's responsibility even when it reuses scores.
+    """
+    entries = []
+
+    def add(family, parameters):
+        identity = canonical_sha256({'family': family, 'parameters': parameters})
+        entries.append(ModelConfig(family, parameters, f'{family}:{identity}'))
+
+    for family in ('MeanNegative', 'SignedMax'):
+        for K in config.K_grid:
+            for penalty in config.lambda_grid:
+                add(family, {'K': K, 'lambda': penalty})
+    for penalty in config.lambda_grid:
+        add('AllExemplarMargin', {'lambda': penalty})
+    for K in config.K_grid:
+        add('PrototypeRatio', {'K': K})
+    add('ExemplarRatio', {})
+    for C in config.C_grid:
+        add('LinearLogistic', {'C': C})
+    for C in config.C_grid:
+        for g in config.g_grid:
+            add('RBFSVM', {'C': C, 'g': g})
+    return entries
+
+
+def _adapter_parameters(method, parameters):
+    expected = {
+        'MeanNegative': {'K', 'lambda'}, 'SignedMax': {'K', 'lambda'},
+        'AllExemplarMargin': {'lambda'}, 'PrototypeRatio': {'K'},
+        'ExemplarRatio': set(), 'LinearLogistic': {'C'}, 'RBFSVM': {'C', 'g'},
+        'Centroid': set(), 'PositiveMax': {'K'}, 'RocchioDirection': {'lambda'},
+    }
+    if method not in expected:
+        raise ValueError(f'unknown method: {method}')
+    parameters = dict(parameters)
+    if set(parameters) != expected[method]:
+        raise ValueError(f'{method} requires parameters {sorted(expected[method])}')
+    if 'K' in parameters:
+        _positive_integer(parameters['K'], 'K')
+    for key in ('lambda', 'C', 'g'):
+        if key in parameters:
+            value = parameters[key]
+            if (isinstance(value, (bool, np.bool_)) or not np.isscalar(value)
+                    or not np.isfinite(value) or value < 0 or (key != 'lambda' and value == 0)):
+                raise ValueError(f'{key} must be finite and {"nonnegative" if key == "lambda" else "positive"}')
+    return parameters
+
+
+def _item_ids(ids, *, distinct=False):
+    ids = tuple(ids)
+    if any(isinstance(i, (bool, np.bool_)) or not isinstance(i, (int, np.integer)) for i in ids):
+        raise ValueError('item IDs must be integers')
+    if distinct and len(set(ids)) != len(ids):
+        raise ValueError('support item IDs must be distinct across both classes')
+    return ids
+
+
+def _failed(diagnostics, failure):
+    diagnostics['status'] = 'failed'
+    if failure not in diagnostics['failures']:
+        diagnostics['failures'].append(failure)
+
+
+def fit_user(method, history: History, embeddings, parameters, *, config: StudyConfig | None = None) -> UserModel:
+    """Fit from capped History only, retaining no sklearn estimator objects.
+
+    Production callers pass the same validated resolved config for every fit.
+    Its pre-freeze global iteration repairs apply without per-user retries.
+    Omission is intended for pure fixtures and uses nominal protocol limits.
+    Failed fits return empty state plus persistable diagnostics; callers must
+    save those diagnostics and apply the study's bounded failure policy.
+    """
+    parameters = _adapter_parameters(method, parameters)
+    positive_ids, negative_ids = tuple(history.positive_ids), tuple(history.negative_ids)
+    support_ids = _item_ids(positive_ids + negative_ids, distinct=True)
+    if not positive_ids:
+        raise ValueError('ineligible history: positive support is empty')
+    if not negative_ids and method in ('LinearLogistic', 'RBFSVM', 'PrototypeRatio', 'ExemplarRatio'):
+        raise ValueError(f'ineligible history: negative support is empty for {method}')
+    support = np.ascontiguousarray(_unit_rows(embeddings.rows(support_ids), 'support'), dtype=np.float64)
+    if len(support) != len(support_ids):
+        raise ValueError('embedding rows must match support item IDs')
+    positive, negative = support[:len(positive_ids)], support[len(positive_ids):]
+    limits = {
+        'prototype_max_updates': 50 if config is None else config.prototype['max_updates'],
+        'logistic_max_iter': 2000 if config is None else config.linear_logistic['max_iter'],
+        'svm_max_iter': 100000 if config is None else config.rbf_svm['max_iter'],
+    }
+    diagnostics = {
+        'status': 'ok', 'failures': [], 'warnings': [],
+        'policy': {**limits, 'source': 'nominal_fixture' if config is None else 'resolved_config',
+                   'pre_freeze_repairs': [] if config is None else [dict(r) for r in config.pre_freeze_repairs]},
+    }
+    model = UserModel(method, parameters, support_ids, {}, diagnostics)
+    if method not in ('LinearLogistic', 'RBFSVM'):
+        if method in ('AllExemplarMargin', 'ExemplarRatio'):
+            P = positive.copy()
+        else:
+            diagnostics['iteration_limit'] = limits['prototype_max_updates']
+            try:
+                prototypes = spherical_prototypes(positive, np.asarray(positive_ids), parameters.get('K', 1),
+                                                  max_updates=limits['prototype_max_updates'])
+            except Exception as error:
+                _failed(diagnostics, 'exception')
+                diagnostics['exception'] = {'category': type(error).__name__, 'message': str(error)}
+                return model
+            P = prototypes.vectors
+            diagnostics['prototype'] = {'objective': prototypes.objective, 'iterations': prototypes.iterations,
+                                        **prototypes.flags}
+        model.state.update(P=P, N=negative.copy())
+        return model
+
+    labels = np.concatenate((np.ones(len(positive), dtype=np.int64), np.zeros(len(negative), dtype=np.int64)))
+    weights = {0: len(support) / (2 * len(negative)), 1: len(support) / (2 * len(positive))}
+    diagnostics['class_weights'] = weights
+    if method == 'LinearLogistic':
+        limit = limits['logistic_max_iter']
+        # sklearn 1.9: l1_ratio=0 expresses L2 without deprecated penalty=.
+        settings = dict(C=parameters['C'], l1_ratio=0, solver='liblinear', fit_intercept=True,
+                        class_weight=weights, tol=1e-8, max_iter=limit, random_state=0)
+        estimator = LogisticRegression(**settings)
+    else:
+        limit = limits['svm_max_iter']
+        distances = pdist(support, metric='sqeuclidean')
+        positive_distances = distances[distances > 0]
+        m2 = float(np.median(positive_distances)) if len(positive_distances) else 1.0
+        gamma = float(parameters['g'] / m2)
+        settings = dict(C=parameters['C'], gamma=gamma, kernel='rbf', class_weight=weights,
+                        tol=1e-6, max_iter=limit, cache_size=64)
+        # sklearn 1.9's omitted probability sentinel disables calibration.
+        estimator = SVC(**settings)
+        model.state.update(m2=m2, gamma=gamma)
+    diagnostics.update(iteration_limit=limit, solver_settings=settings)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        try:
+            estimator.fit(support, labels)
+            iterations = np.asarray(estimator.n_iter_, dtype=np.int64)
+            diagnostics['n_iter'] = iterations.tolist()
+            if np.any(iterations >= limit):
+                _failed(diagnostics, 'iterations')
+            if method == 'RBFSVM':
+                diagnostics['fit_status'] = int(estimator.fit_status_)
+                if estimator.fit_status_ != 0:
+                    _failed(diagnostics, 'status')
+                model.state.update(support_vectors=np.ascontiguousarray(estimator.support_vectors_, dtype=np.float64),
+                                   dual_coef=np.ascontiguousarray(estimator.dual_coef_[0], dtype=np.float64))
+            else:
+                model.state['coef'] = np.ascontiguousarray(estimator.coef_[0], dtype=np.float64)
+            model.state['intercept'] = float(estimator.intercept_[0])
+            training_scores = estimator.decision_function(support)
+            if (not np.isfinite(training_scores).all()
+                    or any(not np.isfinite(value).all() for value in model.state.values())):
+                _failed(diagnostics, 'nonfinite')
+        except Exception as error:
+            _failed(diagnostics, 'exception')
+            diagnostics['exception'] = {'category': type(error).__name__, 'message': str(error)}
+    diagnostics['warnings'] = [{'category': w.category.__name__, 'message': str(w.message)} for w in caught]
+    if caught:
+        _failed(diagnostics, 'warning')
+    del estimator
+    if diagnostics['status'] == 'failed':
+        model.state.clear()
+    return model
+
+
+def score_user(model: UserModel, candidate_ids, embeddings, *, chunk_size=512) -> np.ndarray:
+    """Uncalibrated float64 decisions, with bounded candidate/support blocks.
+
+    Scoring failures update the model's persistable diagnostics before raising.
+    No estimator is kept alive; binary SVC decisions use its saved RBF expansion.
+    """
+    _positive_integer(chunk_size, 'chunk_size')
+    candidate_ids = _item_ids(candidate_ids)
+    if model.diagnostics['status'] != 'ok':
+        raise ValueError('cannot score failed fit; persist model diagnostics')
+    scores = np.empty(len(candidate_ids), dtype=np.float64)
+    try:
+        for start in range(0, len(candidate_ids), chunk_size):
+            ids = candidate_ids[start:start + chunk_size]
+            X = np.ascontiguousarray(_unit_rows(embeddings.rows(ids), 'candidates'), dtype=np.float64)
+            if len(X) != len(ids):
+                raise ValueError('embedding rows must match candidate item IDs')
+            state, method = model.state, model.method
+            with np.errstate(over='ignore', invalid='ignore'):
+                if method == 'LinearLogistic':
+                    values = X @ state['coef'] + state['intercept']
+                elif method == 'RBFSVM':
+                    kernel = np.exp(-state['gamma'] * cdist(X, state['support_vectors'], metric='sqeuclidean'))
+                    values = kernel @ state['dual_coef'] + state['intercept']
+                elif method in ('PrototypeRatio', 'ExemplarRatio'):
+                    values = ratio_scores(X, state['P'], state['N'])
+                elif method in ('MeanNegative', 'RocchioDirection'):
+                    values = np.max(X @ state['P'].T, axis=1)
+                    if len(state['N']):
+                        values -= model.parameters['lambda'] * (X @ state['N'].mean(axis=0))
+                else:
+                    values = signed_scores(X, state['P'], state['N'], model.parameters.get('lambda', 0),
+                                           chunk_size=chunk_size)
+            if not np.isfinite(values).all():
+                _failed(model.diagnostics, 'nonfinite')
+                raise ValueError('nonfinite decision scores')
+            scores[start:start + len(ids)] = values
+    except Exception as error:
+        _failed(model.diagnostics, 'nonfinite' if 'nonfinite' in str(error) else 'scoring')
+        model.diagnostics['score_exception'] = {'category': type(error).__name__, 'message': str(error)}
+        raise
     return scores
