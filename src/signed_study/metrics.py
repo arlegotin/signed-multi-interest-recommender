@@ -13,6 +13,28 @@ import numpy as np
 METRIC_KEYS = ('auc', 'ndcg10', 'negative_at_10', 'tie_fraction')
 
 
+def select_family(rows: list[dict]):
+    """Max-anchored tolerance, with deterministic lexicographic simplicity."""
+    eligible = [r for r in rows if r.get('status') == 'completed'
+                and r.get('complete', True) and np.isfinite(r.get('macro_auc', np.nan))]
+    if not eligible:
+        raise ValueError('No eligible complete configuration')
+    maximum = max(r['macro_auc'] for r in eligible)
+    tied = [r['configuration'] for r in eligible if maximum-r['macro_auc'] <= 1e-6]
+    return min(tied, key=lambda c: tuple(c.parameters.get(k, 0) for k in ('K','lambda','C','g'))+(c.id,))
+
+
+def select_comparator(family_choices: dict):
+    required = {'Centroid','PositiveMax','RocchioDirection','MeanNegative',
+                'AllExemplarMargin','PrototypeRatio','ExemplarRatio','LinearLogistic','RBFSVM'}
+    eligible = {f:r for f,r in family_choices.items() if f in required and r.get('status') == 'completed'
+                and r.get('complete', True) and np.isfinite(r.get('macro_auc', np.nan))}
+    if not eligible:
+        raise ValueError('No eligible required comparator')
+    family = min(eligible, key=lambda f: (-eligible[f]['macro_auc'], f))
+    return eligible[family]['configuration']
+
+
 def _vector(values, name: str, *, low: float, high: float) -> np.ndarray:
     result = np.asarray(values, dtype=np.float64)
     if (result.ndim != 1 or result.size == 0 or not np.isfinite(result).all()

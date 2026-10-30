@@ -168,6 +168,44 @@ class ModelConfig:
     id: str
 
 
+def model_configuration(family, parameters):
+    identity = canonical_sha256({'family': family, 'parameters': parameters})
+    return ModelConfig(family, dict(parameters), f'{family}:{identity}')
+
+
+def endpoint_requests(family_choices, config: StudyConfig) -> list[ModelConfig]:
+    """The single prescribed expansion, including the complete new RBF corner."""
+    def parameters(family):
+        value = family_choices.get(family)
+        if value is None:
+            return {}
+        return (value if isinstance(value, ModelConfig) else value['configuration']).parameters
+
+    def outer(value, grid, expanded):
+        return expanded[0] if value == grid[0] else expanded[-1] if value == grid[-1] else None
+
+    rbf = parameters('RBFSVM')
+    initial_rbf = rbf.get('C') in config.C_grid and rbf.get('g') in config.g_grid
+    C = outer(rbf.get('C'), config.C_grid, config.selection['expanded_C']) if initial_rbf else None
+    g = outer(rbf.get('g'), config.g_grid, config.selection['expanded_g']) if initial_rbf else None
+    pairs = set()
+    if C is not None:
+        pairs.update((C, v) for v in config.g_grid)
+    if g is not None:
+        pairs.update((v, g) for v in config.C_grid)
+    if C is not None and g is not None:
+        pairs.add((C, g))
+    entries = [model_configuration('RBFSVM', {'C': c, 'g': v}) for c,v in sorted(pairs)]
+    C = outer(parameters('LinearLogistic').get('C'), config.C_grid, config.selection['expanded_C'])
+    if C is not None:
+        entries.append(model_configuration('LinearLogistic', {'C': C}))
+    for family in ('MeanNegative', 'AllExemplarMargin', 'SignedMax'):
+        p = parameters(family)
+        if p.get('lambda') == config.lambda_grid[-1]:
+            entries.append(model_configuration(family, {**p, 'lambda': config.selection['expanded_lambda']}))
+    return entries
+
+
 @dataclass(frozen=True)
 class UserModel:
     method: str
@@ -187,8 +225,7 @@ def initial_configurations(config: StudyConfig) -> list[ModelConfig]:
     entries = []
 
     def add(family, parameters):
-        identity = canonical_sha256({'family': family, 'parameters': parameters})
-        entries.append(ModelConfig(family, parameters, f'{family}:{identity}'))
+        entries.append(model_configuration(family, parameters))
 
     for family in ('MeanNegative', 'SignedMax'):
         for K in config.K_grid:

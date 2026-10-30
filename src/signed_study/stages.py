@@ -272,9 +272,36 @@ def _smoke(config,ledger,attempts):
     return result
 
 
+def _develop(config,ledger,attempts):
+    from .development import execute_development
+    with ledger.work('G3',0,0) as check:
+        attempts.append(check)
+        inputs,_,_,_,_,expected,store=_calibration_context(config,ledger)
+        calibration=_prerequisite(config,'calibrate',ledger,inputs)
+        smoke=_prerequisite(config,'smoke',ledger,{'calibrate':calibration['output_sha256'],'development_users':8})
+        resolved=load_config(config.paths['results']/'calibration_config.json')
+        cache=load_embedding_cache(resolved.paths['cache']/'embeddings',expected)
+        inputs={'calibrate':calibration['output_sha256'],'smoke':smoke['output_sha256']}
+        if (config.paths['results']/'stages'/'develop.json').exists():
+            return _prerequisite(config,'develop',ledger,inputs)
+        measurements=_read(config,'calibration.json')
+    result=execute_development(resolved,ledger,store,cache,measurements,attempt_ids=attempts)
+    files={'development':config.paths['results']/result['artifact_name']}
+    for i,batch in enumerate(result['batches']):
+        files[f'batch_{i}']=Path(batch['path'])
+        files[f'journal_{i}']=Path(batch['journal_path'])
+    if result['status']!='completed':
+        return result
+    with ledger.work('G3',0,0) as aid:
+        attempts.append(aid)
+        return save_stage(config,'develop',inputs,files,attempts,
+                          complete_suite_eligible=result['complete_suite_eligible'],
+                          confirmation_outcomes_accessed=False)
+
+
 def run_stage(stage,config,ledger):
     """Run one ordered gate; incomplete prerequisites are explicit failures."""
-    dispatch={'acquire':_acquire,'audit':_audit,'calibrate':_calibrate,'smoke':_smoke}
+    dispatch={'acquire':_acquire,'audit':_audit,'calibrate':_calibrate,'smoke':_smoke,'develop':_develop}
     if stage not in dispatch:
         raise ValueError(f'Unknown implemented stage: {stage}')
     attempts=[]

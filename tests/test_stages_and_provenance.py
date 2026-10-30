@@ -471,6 +471,65 @@ def test_verified_protocol_record_preserves_lock_identity():
     assert protocol.lock_hash == "a" * 64 and protocol.payload == {"schema_version": 1}
 
 
+def test_selection_ties_endpoints_and_failed_configurations(local_config):
+    from signed_study import run
+    from signed_study.models import initial_configurations
+    assert hasattr(run, 'select_family'), 'development selection is missing'
+    entries = initial_configurations(local_config)
+    rows = [dict(configuration=e, status='completed', macro_auc=.6) for e in entries]
+    signed = [r for r in rows if r['configuration'].family == 'SignedMax']
+    signed[-1]['macro_auc'] = .6000009
+    signed[-2].update(status='failed', macro_auc=1.)
+    assert run.select_family(signed) == signed[0]['configuration']
+    assert run.select_family(list(reversed(signed))) == signed[0]['configuration']
+    # Values close to one another must still be compared to the actual maximum.
+    for row in signed: row['macro_auc']=.1
+    signed[0]['macro_auc'] = .6
+    signed[1]['macro_auc'] = .6000009
+    signed[2]['macro_auc'] = .6000018
+    assert run.select_family(signed) == signed[1]['configuration']
+    assert run.select_family(list(reversed(signed))) == signed[1]['configuration']
+    choices = {f: max((r for r in rows if r['configuration'].family == f),
+                     key=lambda r: tuple(r['configuration'].parameters.values()))
+               for f in {e.family for e in entries}}
+    choices['SignedMax']['macro_auc'] = 1.
+    choices['matched_PositiveMax'] = choices['SignedMax']
+    assert run.select_comparator(choices).family == 'AllExemplarMargin'
+    choices['LinearLogistic']['macro_auc']=.6000001
+    assert run.select_comparator(choices).family == 'LinearLogistic'
+    for upper in (False, True):
+        for family in ('MeanNegative','AllExemplarMargin','SignedMax'):
+            choices[family] = next(r for r in reversed(rows) if r['configuration'].family == family)
+        for family in ('LinearLogistic', 'RBFSVM'):
+            choices[family] = next(r for r in rows if r['configuration'].family == family
+                and r['configuration'].parameters['C'] == local_config.C_grid[-1 if upper else 0]
+                and (family != 'RBFSVM' or r['configuration'].parameters['g'] == local_config.g_grid[-1 if upper else 0]))
+        requests = run.endpoint_requests(choices, local_config)
+        rbf = [e for e in requests if e.family == 'RBFSVM']
+        assert len(requests) == 14 and len(rbf) == 10
+        assert len(entries)+len(requests) == 92
+        assert len({e.id for e in requests}) == 14
+        assert [(e.parameters['C'],e.parameters['g']) for e in rbf] == sorted(
+            (e.parameters['C'],e.parameters['g']) for e in rbf)
+        outer_C, outer_g = (1000,64) if upper else (.001,.0625)
+        assert (outer_C,outer_g) in {(e.parameters['C'],e.parameters['g']) for e in rbf}
+        assert [e.family for e in requests[10:]] == [
+            'LinearLogistic','MeanNegative','AllExemplarMargin','SignedMax']
+        for e in requests:
+            choices[e.family] = dict(configuration=e,status='completed',macro_auc=.7)
+        assert run.endpoint_requests(choices,local_config) == []  # no recursive expansion
+    with pytest.raises(ValueError, match='eligible'):
+        run.select_family([dict(configuration=entries[0],status='failed',macro_auc=1.)])
+    from signed_study.models import ModelConfig
+    for key in ('K','lambda','C','g'):
+        # Earlier coordinates are equal; the current coordinate outranks ID.
+        small=ModelConfig('example',{key:1},'z')
+        large=ModelConfig('example',{key:2},'a')
+        assert run.select_family([dict(configuration=e,status='completed',macro_auc=.5) for e in (large,small)])==small
+    assert run.select_family([dict(configuration=ModelConfig('example',{},name),status='completed',macro_auc=.5)
+                              for name in ('z','a')]).id=='a'
+
+
 class FakeClock:
     def __init__(self):
         self.now = 0.0

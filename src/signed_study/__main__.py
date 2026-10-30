@@ -50,7 +50,7 @@ def main(argv=None):
                           "target_compatible": evidence["target_compatible"],
                           "blockers": evidence["blockers"]}, sort_keys=True))
         return 0 if evidence["target_compatible"] else 2
-    if args.command in ('acquire', 'audit', 'calibrate', 'smoke'):
+    if args.command in ('acquire', 'audit', 'calibrate', 'smoke', 'develop'):
         from pathlib import Path
         import json
         from .budget import BudgetExceeded, Ledger, LedgerBusy

@@ -65,7 +65,7 @@ def numerical_variation(reference,repeated,item_ids,*,eta):
             'near_tie_examples':examples,'near_tie_examples_truncated':near>len(examples)}
 
 
-def measure_users(store,cache,users,config,ledger,*,numerical_checks,output_path):
+def measure_users(store,cache,users,config,ledger,*,numerical_checks,output_path,declared_entries=None,timing_only=False):
     """One admitted batch. Load each user's development labels exactly once.
 
     Before each actual user/configuration evaluation, persist a started record.
@@ -75,11 +75,13 @@ def measure_users(store,cache,users,config,ledger,*,numerical_checks,output_path
     episodes={e.history.user_id:e for e in store.development}
     if len(set(users))!=len(users) or any(uid not in episodes for uid in users):
         raise PermissionError('Workload users must be unique admitted development users')
-    entries=calibration_entries(config) if numerical_checks else initial_configurations(config)
+    entries=(calibration_entries(config) if numerical_checks else initial_configurations(config)) if declared_entries is None else list(declared_entries)
+    if not entries or len({e.id for e in entries}) != len(entries):
+        raise ValueError('Declared entries must be nonempty and unique')
     result=dict(status='completed',attempts=[],actual_evaluations=0,user_measurements=[],resource_trace=[],
                 chunk_invariance=True,repair_decisions=[],fixed_seconds=0.,optional_seconds=0.,memory_bound=False)
     inputs={'episodes':episode_store_digest(store),'user_ids':users,
-            'entries':[e.id for e in entries],'numerical_checks':numerical_checks}
+            'entries':[e.id for e in entries],'numerical_checks':numerical_checks,'timing_only':timing_only}
 
     def persist():
         atomic_write_json(output_path,dict(schema_version=1,input_sha256=canonical_sha256(inputs),
@@ -117,7 +119,7 @@ def measure_users(store,cache,users,config,ledger,*,numerical_checks,output_path
         user_start=time.perf_counter_ns()
         ledger.checkpoint()
         episode=episodes[uid]
-        labels=load_development_outcomes(store,uid)
+        labels=None if timing_only else load_development_outcomes(store,uid)
         input_seconds=(time.perf_counter_ns()-user_start)/1e9
         for entry in entries:
             boundary_start=time.perf_counter_ns()
@@ -132,11 +134,14 @@ def measure_users(store,cache,users,config,ledger,*,numerical_checks,output_path
                 row['diagnostics']=model.diagnostics
                 if model.diagnostics['status']!='ok':
                     raise ValueError('Failed fit; see persisted model diagnostics')
+                if 'P' in model.state:
+                    row['prototype_identity']=canonical_sha256(dict(
+                        positive_ids=list(episode.history.positive_ids),vectors=model.state['P'].tolist()))
                 if model.diagnostics.get('prototype',{}).get('cap_hit'):
                     cap_users.add(uid)
                 start=time.perf_counter_ns()
                 scores=score_user(model,episode.candidate_ids,cache,chunk_size=chunk)
-                metrics=evaluate_user(scores,labels,episode.candidate_ids)
+                metrics=None if timing_only else evaluate_user(scores,labels,episode.candidate_ids)
                 score_seconds=(time.perf_counter_ns()-start)/1e9
                 row.update(status='completed',fit_seconds=fit_seconds,score_seconds=score_seconds,
                            metrics=metrics,scores=scores.tolist(),candidate_ids=list(episode.candidate_ids))
@@ -150,6 +155,7 @@ def measure_users(store,cache,users,config,ledger,*,numerical_checks,output_path
                     positive_count=len(episode.history.positive_ids),negative_count=len(episode.history.negative_ids),
                     candidate_count=len(episode.candidate_ids),fit_seconds=fit_seconds,score_seconds=score_seconds,
                     write_seconds=write_seconds,overhead_seconds=overhead_seconds+input_seconds/len(entries),
+                    diagnostics=model.diagnostics,
                     chunk_size=chunk,score_measurements={str(chunk):dict(score_seconds=score_seconds,
                         write_seconds=write_seconds,overhead_seconds=overhead_seconds+input_seconds/len(entries),
                         numerical_accepted=True)})

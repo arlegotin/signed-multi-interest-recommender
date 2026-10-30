@@ -18,6 +18,12 @@ from threadpoolctl import threadpool_info
 from .budget import Ledger, atomic_write_json
 from .protocol import StudyConfig, canonical_sha256
 from .calibration import select_calibration_users, forecast_scale
+from .metrics import select_family, select_comparator
+from .models import endpoint_requests
+
+
+def develop(config: StudyConfig, ledger: Ledger) -> dict:
+    return run_stage('develop', config, ledger)
 
 
 def run_stage(stage: str, config: StudyConfig, ledger: Ledger) -> dict:
