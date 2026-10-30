@@ -1,4 +1,4 @@
-"""CLI-facing target inspection; later tasks add the ordered experiment stages."""
+"""CLI-facing target inspection and ordered acquisition/calibration interfaces."""
 
 from dataclasses import fields
 from datetime import datetime, timezone
@@ -17,6 +17,12 @@ from threadpoolctl import threadpool_info
 
 from .budget import Ledger, atomic_write_json
 from .protocol import StudyConfig, canonical_sha256
+from .calibration import select_calibration_users, forecast_scale
+
+
+def run_stage(stage: str, config: StudyConfig, ledger: Ledger) -> dict:
+    from .stages import run_stage as execute
+    return execute(stage, config, ledger)
 
 
 _PACKAGES = ('numpy', 'scipy', 'scikit-learn', 'torch', 'sentence-transformers',

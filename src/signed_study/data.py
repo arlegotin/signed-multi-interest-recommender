@@ -455,6 +455,41 @@ def load_development_outcomes(store: EpisodeStore, user_id: int) -> np.ndarray:
     return _load_outcomes(store, user_id, "development")
 
 
+def load_episode_store(audit_path: Path, episodes_path: Path) -> EpisodeStore:
+    """Reload validated model-facing records without opening either outcome set."""
+    audit = json.loads(Path(audit_path).read_text())
+    records = json.loads(Path(episodes_path).read_text())
+    if audit.get('status') != 'validated' or audit.get('schema_version') != 1:
+        raise ValueError('Episode audit is not validated')
+    if _sha256(Path(episodes_path)) != audit['outputs']['episodes_file_sha256']:
+        raise ValueError('Episode file integrity discrepancy')
+    if canonical_sha256(audit['outputs']) != audit['output_sha256']:
+        raise ValueError('Episode audit output integrity discrepancy')
+    roles = {}
+    for role in ('development', 'confirmation'):
+        episodes = []
+        for record in records[role]:
+            h = record['history']
+            if h['role'] != role:
+                raise ValueError('Episode role mismatch')
+            history = History(h['user_id'], h['cutoff'], role, tuple(h['positive_ids']), tuple(h['negative_ids']))
+            ids = (*history.positive_ids, *history.negative_ids, *record['candidate_ids'], history.user_id)
+            if any(type(i) is not int for i in ids):
+                raise ValueError('Episode IDs must be integers')
+            episodes.append(Episode(history, tuple(record['candidate_ids'])))
+        if len({e.history.user_id for e in episodes}) != len(episodes):
+            raise ValueError('Duplicate episode user')
+        roles[role] = tuple(episodes)
+    paths = {'audit': Path(audit_path), 'episodes': Path(episodes_path), **{
+        role+'_outcomes': Path(episodes_path).parent/'outcomes'/role for role in roles}}
+    store = EpisodeStore(roles['development'], roles['confirmation'], audit, MappingProxyType(paths))
+    if episode_store_digest(store) != audit['episodes_sha256'] or records['output_sha256'] != audit['episodes_sha256']:
+        raise ValueError('Episode store digest discrepancy')
+    if {e.history.user_id for e in store.development} & {e.history.user_id for e in store.confirmation}:
+        raise ValueError('Overlapping outcome roles')
+    return store
+
+
 def load_confirmation_outcomes(store: EpisodeStore, user_id: int, permit: VerifiedProtocol) -> np.ndarray:
     """Require the verifier's locked confirmation IDs and exact episode digest."""
     if not isinstance(permit, VerifiedProtocol) or not isinstance(permit.payload, dict):

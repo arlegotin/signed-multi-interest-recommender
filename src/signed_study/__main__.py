@@ -5,10 +5,10 @@ import argparse
 
 _COMMANDS = {
     "inspect": "G0: inspect hardware/resources; no outcomes accessed.",
-    "acquire": "G0: acquire fixed data/model manifests; no comparison outcomes.",
-    "audit": "G0: validate data and eligibility; auditor-only outcome access.",
-    "calibrate": "G2: requires G1; encode catalog and calibrate development users.",
-    "smoke": "G3: requires calibrated cache; development outcomes only.",
+    "acquire": "G0: requires compatible inspect evidence; acquire fixed data/model manifests; no comparison outcomes.",
+    "audit": "G0: requires acquisition; validate data and eligibility; auditor-only outcome access.",
+    "calibrate": "G2: requires audit and current recorded G1 full-suite evidence; probe, verify complete cache, then development outcomes only.",
+    "smoke": "G3: requires successful calibration and complete verified cache; exactly 8 development users, no confirmation outcomes.",
     "develop": "G3: requires calibrated cache and forecast; development outcomes only.",
     "freeze": "G3: requires validated development and clean committed source; lock protocol.",
     "confirm": "G4: requires verified immutable lock before opening confirmation outcomes.",
@@ -50,6 +50,27 @@ def main(argv=None):
                           "target_compatible": evidence["target_compatible"],
                           "blockers": evidence["blockers"]}, sort_keys=True))
         return 0 if evidence["target_compatible"] else 2
+    if args.command in ('acquire', 'audit', 'calibrate', 'smoke'):
+        from pathlib import Path
+        import json
+        from .budget import BudgetExceeded, Ledger, LedgerBusy
+        from .protocol import load_config
+        from .run import run_stage
+
+        if args.command == 'smoke' and args.development_users != 8:
+            parser.error('smoke requires exactly --development-users 8')
+        ledger = None
+        try:
+            config = load_config(Path(args.config))
+            ledger = Ledger(config.paths['results'] / 'budget_ledger.jsonl', config)
+            result = run_stage(args.command, config, ledger)
+        except (ValueError, BudgetExceeded, LedgerBusy) as error:
+            parser.exit(2, f'{args.command} blocked: {error}\n')
+        finally:
+            if ledger is not None:
+                ledger.close()
+        print(json.dumps(result, sort_keys=True))
+        return 0 if result['status'] == 'completed' else 2
     parser.error(f"{args.command}: stage execution is not implemented yet")
 
 
