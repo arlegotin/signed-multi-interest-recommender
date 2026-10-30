@@ -360,3 +360,10 @@ def test_unexpected_official_counts_save_discrepancy_and_stop(local_config, monk
 def test_empty_cutoff_rejected():
     with pytest.raises(ValueError, match="empty|ratings"):
         temporal_cutoff(())
+
+
+def test_confirmation_permit_rejects_duplicate_membership(ninety_ratings,local_config):
+    store=make_episodes(dataset_for(tuple(replace(r,user_id=2) for r in ninety_ratings)),local_config)
+    permit=VerifiedProtocol('a'*64,{'data_access':{'confirmation_user_ids':[2,2],
+                           'episodes_sha256':episode_store_digest(store)}})
+    with pytest.raises(PermissionError): load_confirmation_outcomes(store,2,permit)

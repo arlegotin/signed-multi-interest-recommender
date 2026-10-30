@@ -24,6 +24,8 @@ def main(argv=None):
         command = commands.add_parser(name, help=description, description=description)
         if name in ("confirm", "diagnose"):
             command.add_argument("--lock", default="results/protocol.lock.json")
+            if name == "confirm":
+                command.add_argument("--correction-reason", help="Invalidate exposed confirmation and authorize a verified implementation-only exploratory correction.")
         elif name == "report":
             command.add_argument("--results", default="results")
         else:
@@ -71,6 +73,37 @@ def main(argv=None):
                 ledger.close()
         print(json.dumps(result, sort_keys=True))
         return 0 if result['status'] == 'completed' else 2
+    if args.command in ('freeze','confirm'):
+        from pathlib import Path
+        import json
+        from .budget import BudgetExceeded, Ledger, LedgerBusy
+        from .protocol import load_config, config_from_record
+        from .protocol_lock import read_lock
+        from .run import freeze_protocol, confirm
+        from .confirmation import record_implementation_correction
+
+        ledger=None
+        try:
+            if args.command=='freeze':
+                config=load_config(Path(args.config))
+            else:
+                _,payload=read_lock(Path(args.lock))
+                config=config_from_record(payload['invocation_config'])
+            ledger=Ledger(config.paths['results']/'budget_ledger.jsonl',config)
+            if args.command=='freeze':
+                development=json.loads((config.paths['results']/'stages'/'develop.json').read_text())
+                path=freeze_protocol(config,development,ledger)
+                result=dict(status='completed',lock=str(path),lock_sha256=read_lock(path)[0])
+            else:
+                if args.correction_reason:
+                    record_implementation_correction(Path(args.lock),ledger,args.correction_reason)
+                result=confirm(Path(args.lock),ledger)
+        except (ValueError,OSError,KeyError,BudgetExceeded,LedgerBusy) as error:
+            parser.exit(2,f'{args.command} blocked: {error}\n')
+        finally:
+            if ledger is not None: ledger.close()
+        print(json.dumps(result,sort_keys=True))
+        return 0 if result['status']=='completed' else 2
     parser.error(f"{args.command}: stage execution is not implemented yet")
 
 

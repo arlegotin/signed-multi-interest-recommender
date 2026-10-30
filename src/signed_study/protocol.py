@@ -300,9 +300,23 @@ def load_config(path: Path) -> StudyConfig:
     """
     with Path(path).open(encoding="utf-8") as handle:
         settings = json.load(handle, parse_constant=_reject_constant, object_pairs_hook=_unique_keys)
+    return config_from_record(settings)
+
+
+def config_from_record(settings: dict) -> StudyConfig:
+    """Reconstruct locked settings through the same strict schema validation."""
     _check_finite(settings)
     _validate_fixed(settings, _FIXED_SETTINGS)
     _validate_variable_settings(settings)
     values = {key: _freeze(value) for key, value in settings.items()}
     values["paths"] = MappingProxyType({key: Path(value) for key, value in settings["paths"].items()})
     return StudyConfig(**values)
+
+
+class ProtocolMismatch(ValueError):
+    """Immutable protocol or live provenance no longer agrees."""
+
+
+def verify_protocol(lock_path: Path, live_inputs: dict) -> VerifiedProtocol:
+    from .protocol_lock import verify_protocol as verify
+    return verify(lock_path, live_inputs)

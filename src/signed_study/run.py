@@ -156,3 +156,13 @@ def inspect_environment(config: StudyConfig) -> dict:
         return evidence
     finally:
         ledger.close()
+
+
+def freeze_protocol(config: StudyConfig, development: dict, ledger: Ledger) -> Path:
+    from .protocol_lock import freeze_protocol as freeze
+    return freeze(config, development, ledger)
+
+
+def confirm(lock_path: Path, ledger: Ledger) -> dict:
+    from .confirmation import confirm as execute
+    return execute(lock_path, ledger)

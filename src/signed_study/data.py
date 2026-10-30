@@ -499,6 +499,7 @@ def load_confirmation_outcomes(store: EpisodeStore, user_id: int, permit: Verifi
         raise PermissionError("Protocol permit lacks locked data access")
     locked_ids = access.get("confirmation_user_ids")
     if (not isinstance(locked_ids, (list, tuple)) or any(type(u) is not int for u in locked_ids)
+            or len(set(locked_ids)) != len(locked_ids)
             or user_id not in locked_ids or access.get("episodes_sha256") != episode_store_digest(store)):
         raise PermissionError("Protocol permit does not match the locked confirmation episode store")
     return _load_outcomes(store, user_id, "confirmation")

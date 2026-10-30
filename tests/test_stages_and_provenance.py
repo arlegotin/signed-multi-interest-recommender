@@ -1044,3 +1044,14 @@ def test_terminal_group_cleanup_does_not_wait_or_require_signal_permission(monke
     assert result['verified_no_live_members'] is True
     assert result['terminal_pids'] == [123]
     assert result['signals'] == []
+
+
+def test_frozen_config_roundtrip_keeps_validation(study_config_path):
+    from signed_study import protocol
+    from signed_study.stage_evidence import config_record
+    assert hasattr(protocol, 'config_from_record'), 'locked config reconstruction missing'
+    config=protocol.load_config(study_config_path)
+    assert protocol.config_from_record(config_record(config)) == config
+    changed=config_record(config)
+    changed['delta']=.005
+    with pytest.raises(ValueError): protocol.config_from_record(changed)
