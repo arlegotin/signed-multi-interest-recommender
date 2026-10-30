@@ -116,7 +116,7 @@ def test_embedding_probe_repeatability_and_reuse(embedding_inputs, deterministic
     probe = encode_probe(**embedding_inputs, encoder=deterministic_encoder, item_ids=[9])
     assert probe.item_ids.tolist() == [9]
     assert not (embedding_inputs["config"].paths["cache"] / "embeddings").exists()
-    assert check_repeatability(probe.vectors, probe.vectors)["accepted"]
+    assert check_repeatability(probe.raw_vectors, probe.raw_vectors)["accepted"]
     assert check_repeatability(np.zeros((1, 384)), np.full((1, 384), 1e-5))["accepted"]
     with pytest.raises(ValueError, match="repeat"):
         check_repeatability(np.zeros((1, 384)), np.full((1, 384), np.nextafter(1e-5, np.inf)))
@@ -128,6 +128,56 @@ def test_embedding_probe_repeatability_and_reuse(embedding_inputs, deterministic
 
     repeated = encode_items(**embedding_inputs, encoder=Unavailable())
     np.testing.assert_array_equal(repeated.vectors, cache.vectors)
+
+
+def test_embedding_probe_rejects_proportional_raw_repeat(embedding_inputs, deterministic_encoder):
+    from signed_study.embed import encode_probe, check_repeatability
+
+    class ProportionalEncoder:
+        scale = 1
+
+        def token_lengths(self, texts):
+            return deterministic_encoder.token_lengths(texts)
+
+        def encode(self, texts, *, batch_size):
+            raw = deterministic_encoder.encode(texts, batch_size=batch_size) * self.scale
+            self.scale *= 2
+            return raw
+
+    encoder = ProportionalEncoder()
+    first = encode_probe(**embedding_inputs, encoder=encoder, item_ids=[9, 2])
+    second = encode_probe(**embedding_inputs, encoder=encoder, item_ids=[2, 9])
+    # Geometry intentionally remains identical: the repeat gate must use raw outputs.
+    np.testing.assert_array_equal(first.vectors, second.vectors)
+    np.testing.assert_array_equal(first.raw_rows([2])[:, :2], [[3, 4]])
+    np.testing.assert_array_equal(second.raw_rows([2])[:, :2], [[6, 8]])
+    with pytest.raises(ValueError, match="repeat encoding difference 4.0"):
+        check_repeatability(first.raw_rows([9, 2]), second.raw_rows([9, 2]))
+
+
+def test_embedding_probe_raw_rows_preserve_alignment_dtype_and_immutable_storage(embedding_inputs, deterministic_encoder):
+    from signed_study.embed import encode_probe
+
+    probe = encode_probe(**embedding_inputs, encoder=deterministic_encoder, item_ids=[9, 2])
+    assert probe.item_ids.tolist() == [2, 9]
+    assert probe.raw_vectors.dtype == np.float32
+    assert probe.raw_vectors.flags.c_contiguous
+    assert probe.vectors.dtype == np.float64
+    np.testing.assert_array_equal(probe.raw_vectors[:, :2], [[3, 4], [4, 3]])
+    selected = probe.raw_rows([9, 2, 9])
+    assert selected.dtype == np.float32
+    np.testing.assert_array_equal(selected[:, :2], [[4, 3], [3, 4], [4, 3]])
+    with pytest.raises(ValueError):
+        probe.raw_vectors[0, 0] = 99
+    with pytest.raises(ValueError):
+        probe.raw_vectors.setflags(write=True)
+    selected[0, 0] = 99
+    assert probe.raw_rows([9])[0, 0] == 4
+    assert probe.raw_rows([]).shape == (0, 384)
+    with pytest.raises(KeyError):
+        probe.raw_rows([99])
+    with pytest.raises(ValueError, match="integer"):
+        probe.raw_rows(["9"])
 
 
 def test_resolve_encoder_pins_allowlisted_public_files(embedding_inputs, monkeypatch):

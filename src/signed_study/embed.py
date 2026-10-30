@@ -7,7 +7,7 @@ revision to a newly constructed config before G2 calls the probe/full encoder.
 """
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
 from importlib.metadata import version
 import json
@@ -242,12 +242,39 @@ class EmbeddingCache:
         object.__setattr__(self, "vectors", np.frombuffer(vectors.tobytes(), dtype=np.float64).reshape(vectors.shape))
         object.__setattr__(self, "manifest", _json_copy(self.manifest))
 
-    def rows(self, item_ids) -> np.ndarray:
+    def _row_indices(self, item_ids):
         requested = list(item_ids)
         if any(type(item) is not int and not isinstance(item, np.integer) for item in requested):
             raise ValueError("Embedding row lookup requires integer IDs")
         index = {int(item): row for row, item in enumerate(self.item_ids)}
-        return self.vectors[[index[int(item)] for item in requested]]
+        return [index[int(item)] for item in requested]
+
+    def rows(self, item_ids) -> np.ndarray:
+        return self.vectors[self._row_indices(item_ids)]
+
+
+@dataclass(frozen=True)
+class EmbeddingProbe(EmbeddingCache):
+    """Probe geometry plus the aligned immutable raw float32 encoder outputs.
+
+    `vectors`/`rows` retain EmbeddingCache's normalized float64 semantics. G2
+    repeatability compares `raw_vectors` or `raw_rows(ids)` to preserve magnitude
+    changes. Selected rows are independent copies; stored raw outputs are immutable.
+    """
+
+    raw_vectors: np.ndarray = field(init=False, repr=False)
+
+    def __post_init__(self):
+        raw = np.asarray(self.vectors)
+        if raw.dtype != np.float32:
+            raise ValueError("Probe raw encoder vectors must be float32")
+        super().__post_init__()
+        immutable = np.frombuffer(raw.tobytes(order="C"), dtype=np.float32).reshape(raw.shape)
+        object.__setattr__(self, "raw_vectors", immutable)
+
+    def raw_rows(self, item_ids) -> np.ndarray:
+        """Return raw float32 copies in requested ID order, preserving duplicates."""
+        return self.raw_vectors[self._row_indices(item_ids)]
 
 
 class _LocalEncoder:
@@ -320,10 +347,11 @@ def _encode(metadata, config, expected, encoder_provenance, encoder, checkpoint)
 
 
 def check_repeatability(first, second, tolerance=1e-5) -> dict:
-    """Check maximum absolute difference on aligned repeated float64 unit rows.
+    """Check maximum absolute difference on aligned raw encoder outputs.
 
-    Alignment/subset selection belongs to the caller. Never renormalizes the
-    supplied repeats, which could hide a broken repeat. Raises above tolerance.
+    G2 passes EmbeddingProbe.raw_rows(repeat_ids), never normalized geometry rows.
+    Differences are calculated in float64 without normalizing the supplied raw
+    outputs. Alignment/subset selection belongs to the caller. Raises above tolerance.
     """
     first, second = np.asarray(first, dtype=np.float64), np.asarray(second, dtype=np.float64)
     if (first.shape != second.shape or first.ndim != 2 or not first.size
@@ -339,12 +367,13 @@ def check_repeatability(first, second, tolerance=1e-5) -> dict:
 
 
 def encode_probe(metadata, config, *, encoder_provenance, dataset_manifest, item_ids,
-                 encoder=None, checkpoint=None) -> EmbeddingCache:
+                 encoder=None, checkpoint=None) -> EmbeddingProbe:
     """Encode a caller-selected subset without writing/reusing the full cache.
 
     G2 selects its 128 probe/32 repeat IDs and times each call under Ledger.work.
     Passing the same encoder object excludes model loading from a repeat timing.
-    ID order in the returned cache is sorted; use rows(ids) for explicit alignment.
+    IDs are sorted in the returned probe. G2 compares raw_rows(repeat_ids) from
+    successive probes; vectors/rows(ids) remain normalized float64 geometry only.
     """
     ids = list(item_ids)
     if not ids or any(type(i) is not int for i in ids) or len(set(ids)) != len(ids):
@@ -355,7 +384,7 @@ def encode_probe(metadata, config, *, encoder_provenance, dataset_manifest, item
     manifest = {**expected, "accounting": accounting, "probe": True,
                 "array_sha256": hashlib.sha256(raw.tobytes()).hexdigest()}
     manifest["output_sha256"] = canonical_sha256(manifest)
-    return EmbeddingCache(np.array(expected["inputs"]["item_ids"], dtype=np.int64), raw, manifest)
+    return EmbeddingProbe(np.array(expected["inputs"]["item_ids"], dtype=np.int64), raw, manifest)
 
 
 def load_embedding_cache(path, expected_manifest: dict) -> EmbeddingCache:
