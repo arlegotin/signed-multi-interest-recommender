@@ -39,6 +39,10 @@ class BudgetExceeded(RuntimeError):
     """A fixed resource ceiling would be exceeded or has been reached."""
 
 
+class CommandCleanupError(RuntimeError):
+    """An admitted command group is still live or cannot be verified stopped."""
+
+
 class LedgerBusy(RuntimeError):
     """Another writer owns this study's workload lock."""
 
@@ -100,6 +104,59 @@ class ResourceSampler:
         return dict(installed_ram_bytes=memory.total, available_memory_bytes=memory.available,
                     rss_bytes=rss, project_disk_bytes=self._disk_bytes,
                     free_disk_bytes=shutil.disk_usage(self.root).free)
+
+
+def _command_group_state(pgid, known_pids=()):
+    """Find live members independently of the reaped/reparented group leader.
+
+    Terminal zombies cannot execute work and may belong to another reaper. Keep
+    their PIDs as evidence instead of waiting forever for somebody else's wait().
+    """
+    state = dict(process_group_id=pgid, live_pids=[], terminal_pids=[])
+    try:
+        for pid in set(psutil.pids()).union(known_pids):
+            try:
+                if pid in known_pids or os.getpgid(pid) == pgid:
+                    status = psutil.Process(pid).status()
+                    key = 'terminal_pids' if status in (psutil.STATUS_ZOMBIE, psutil.STATUS_DEAD) else 'live_pids'
+                    state[key].append(pid)
+            except (ProcessLookupError, psutil.NoSuchProcess):
+                pass
+    except (PermissionError, psutil.AccessDenied) as error:
+        raise CommandCleanupError(f'Command group {pgid} cleanup membership unavailable: {error}') from error
+    return state
+
+
+def _stop_command_group(process):
+    """Bound TERM/KILL cleanup by group membership, never leader wait alone."""
+    process.poll()  # Reap our direct child when possible; it is not the whole group.
+    state = _command_group_state(process.pid)
+    had_live_members = bool(state['live_pids'])
+    known_pids = set(state['live_pids'])
+    signals = []
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        if not state['live_pids']:
+            break
+        try:
+            os.killpg(process.pid, sig)
+            signals.append(sig.name)
+        except ProcessLookupError:
+            pass
+        except PermissionError as error:
+            raise CommandCleanupError(f'Command group {process.pid} cleanup signal denied: {error}') from error
+        deadline = time.monotonic() + 1
+        while True:
+            process.poll()
+            # macOS can remove group membership before a dying PID becomes
+            # terminal in process-status queries. Verify observed members too.
+            state = _command_group_state(process.pid, known_pids)
+            known_pids.update(state['live_pids'])
+            if not state['live_pids'] or time.monotonic() >= deadline:
+                break
+            time.sleep(min(.02, max(0, deadline - time.monotonic())))
+    if state['live_pids']:
+        raise CommandCleanupError(f'Command group {process.pid} cleanup timed out with live members {state["live_pids"]}')
+    return dict(state, had_live_members=had_live_members, signals=signals, verified_no_live_members=True)
 
 
 def _plain(value):
@@ -262,6 +319,10 @@ class Ledger:
             self._append('bootstrap_import', record_id=record_id, stage=stage,
                          elapsed_seconds=elapsed, interrupted=interrupted, source_records=records)
         for attempt_id, attempt in self._state(self._cached)['unfinished_attempts'].items():
+            if attempt.get('process_group_id') is not None:
+                group = _command_group_state(attempt['process_group_id'])
+                if group['live_pids']:
+                    raise CommandCleanupError(f'Unfinished command group {attempt["process_group_id"]} requires cleanup before admission')
             elapsed = max(attempt['forecast_seconds'], attempt.get('elapsed_seconds', 0),
                           max(0, self.wall_clock() - attempt['started_at']))
             self._append('finish', attempt_id=attempt_id, status='interrupted', elapsed_seconds=elapsed,
@@ -287,7 +348,7 @@ class Ledger:
                 state['attempts'][row['attempt_id']] = dict(row, status='unfinished', elapsed_seconds=0)
                 state['attempted_evaluations'] += row['evaluations']
                 state['repair_cycles'] += row['stage'] == 'repair'
-            elif event in ('checkpoint', 'finish'):
+            elif event in ('checkpoint', 'finish', 'command_started', 'cleanup_blocked'):
                 attempt = state['attempts'][row['attempt_id']]
                 attempt.update(row)
             elif event == 'overhead':
@@ -479,18 +540,23 @@ class Ledger:
                 self.finish(attempt, 'completed', {}, {})
 
     def run_command(self, command: list[str], *, stage='G1', projected_seconds=60) -> int:
-        """Account a validation/setup command once, including failures and cleanup.
+        """Account one validation/setup command including bounded group cleanup.
 
-        Never wrap a CLI stage that already uses this ledger: its own admission
-        owns the lock and accounts the workload. Children use a new process group
-        so interruption terminates them before ownership is released.
+        Never wrap a CLI stage already using this ledger. Commands must join and
+        wait for their work: even normal leader exit with live descendants fails
+        after terminating that group. Unverifiable cleanup leaves an unfinished
+        command that blocks admission on reopen, including after close()/exit.
         """
         if stage not in ('G1', 'setup'):
             raise ValueError('Command accounting is for G1 validation or setup')
         attempt = self.admit(stage, projected_seconds, evaluations=0)
         process = None
+        cleanup = None
         try:
-            process = subprocess.Popen(command, start_new_session=True)
+            with self._critical():
+                process = subprocess.Popen(command, start_new_session=True)
+                self._append('command_started', attempt_id=attempt, process_group_id=process.pid,
+                             command=command)
             while True:
                 try:
                     code = process.wait(timeout=self.config.resources['rss_sample_seconds'])
@@ -498,25 +564,31 @@ class Ledger:
                 except subprocess.TimeoutExpired:
                     self.checkpoint()
             self.checkpoint()
+            with self._critical():
+                self._stop_watchdog()
+                cleanup = _stop_command_group(process)
+            if cleanup['had_live_members']:
+                raise CommandCleanupError('Command leader exited with live descendants; group cleanup was required')
         except BaseException as error:
             with self._critical():
                 self._stop_watchdog()
-                if process is not None and process.poll() is None:
+                if process is not None and cleanup is None:
                     try:
-                        os.killpg(process.pid, signal.SIGTERM)
-                    except ProcessLookupError:
-                        pass
-                    try:
-                        process.wait(timeout=1)
-                    except subprocess.TimeoutExpired:
-                        os.killpg(process.pid, signal.SIGKILL)
-                        process.wait()
+                        cleanup = _stop_command_group(process)
+                    except CommandCleanupError as cleanup_error:
+                        self._append('cleanup_blocked', attempt_id=attempt, process_group_id=process.pid,
+                                     elapsed_seconds=max(0, self.clock() - self._started),
+                                     cleanup_error=str(cleanup_error), original_exception=str(error))
+                        # Keep the attempt/lock owned; close or process exit may
+                        # release OS resources, but reopening still refuses work.
+                        raise cleanup_error from error
                 status = 'budget_exceeded' if isinstance(error, BudgetExceeded) else 'failed'
                 self.finish(attempt, status, {'exception': str(error)},
-                            dict(command=command, returncode=process.returncode if process else None))
+                            dict(command=command, returncode=process.returncode if process else None,
+                                 process_group_cleanup=cleanup))
             raise
         self.finish(attempt, 'completed' if code == 0 else 'failed', {},
-                    dict(command=command, returncode=code))
+                    dict(command=command, returncode=code, process_group_cleanup=cleanup))
         return code
 
     def close(self):

@@ -537,3 +537,126 @@ def test_inspect_cli_reports_configured_artifact_location(local_config, monkeypa
     monkeypatch.setattr(run, 'inspect_environment', lambda config: dict(target_compatible=True, blockers=[]))
     assert __main__.main(['inspect', '--config', 'study.json']) == 0
     assert json.loads(capsys.readouterr().out)['environment'] == 'results/nested/environment.json'
+
+
+@pytest.mark.parametrize('exit_path', ['running_leader_limit', 'exited_leader_limit', 'normal_leader_exit'])
+def test_recorded_command_stops_term_ignoring_descendants(budget_case, local_config, tmp_path, monkeypatch, exit_path):
+    import os
+    import signal
+    import sys
+    import psutil
+    from signed_study.budget import BudgetExceeded, Ledger
+
+    ledger, clock, resources = budget_case
+    child_file = tmp_path / 'descendant.pid'
+    leader_file = tmp_path / 'leader.pid'
+    child_code = "import os,pathlib,signal,sys,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(30)"
+    leader_code = """
+import os, pathlib, subprocess, sys, time
+child = subprocess.Popen([sys.executable, '-c', sys.argv[1], sys.argv[2]])
+deadline = time.monotonic() + 3
+while not pathlib.Path(sys.argv[2]).exists():
+    if time.monotonic() >= deadline:
+        raise RuntimeError('child did not become ready')
+    time.sleep(.005)
+pathlib.Path(sys.argv[3]).write_text(str(os.getpid()))
+if sys.argv[4] == 'running_leader_limit':
+    time.sleep(30)
+"""
+    original = ledger.checkpoint
+
+    def is_live(pid):
+        try:
+            return psutil.Process(pid).status() not in (psutil.STATUS_ZOMBIE, psutil.STATUS_DEAD)
+        except psutil.NoSuchProcess:
+            return False
+
+    def limit_when_ready():
+        if leader_file.exists() and exit_path != 'normal_leader_exit':
+            if exit_path == 'running_leader_limit' or not is_live(int(leader_file.read_text())):
+                raise BudgetExceeded('synthetic descendant limit')
+        return original()
+
+    monkeypatch.setattr(ledger, 'checkpoint', limit_when_ready)
+    try:
+        if exit_path == 'normal_leader_exit':
+            with pytest.raises(RuntimeError, match='descendants'):
+                ledger.run_command([sys.executable, '-c', leader_code, child_code,
+                                    str(child_file), str(leader_file), exit_path], projected_seconds=1)
+        else:
+            with pytest.raises(BudgetExceeded, match='synthetic descendant limit'):
+                ledger.run_command([sys.executable, '-c', leader_code, child_code,
+                                    str(child_file), str(leader_file), exit_path], projected_seconds=1)
+        assert not is_live(int(child_file.read_text())), 'SIGTERM-ignoring descendant survived cleanup'
+        assert ledger.snapshot()['unfinished_attempts'] == {}
+        other = Ledger(ledger.path, local_config, clock=clock, sampler=lambda: dict(resources))
+        with other.work('G1', 1, 0):
+            pass
+        other.close()
+    finally:
+        if leader_file.exists() and (is_live(int(leader_file.read_text())) or is_live(int(child_file.read_text()))):
+            try:
+                os.killpg(int(leader_file.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+def test_cleanup_permission_failure_blocks_reopened_admission(budget_case, local_config, tmp_path, monkeypatch):
+    import os
+    import signal
+    import sys
+    from signed_study.budget import BudgetExceeded, Ledger
+
+    ledger, clock, resources = budget_case
+    pid_file = tmp_path / 'blocked-child.pid'
+    original_checkpoint = ledger.checkpoint
+    original_killpg = os.killpg
+
+    def limit_when_ready():
+        if pid_file.exists():
+            raise BudgetExceeded('synthetic denied-cleanup limit')
+        return original_checkpoint()
+
+    def denied_killpg(pgid, sig):
+        if sig:
+            raise PermissionError('synthetic group signal permission denial')
+        return original_killpg(pgid, sig)
+
+    monkeypatch.setattr(ledger, 'checkpoint', limit_when_ready)
+    try:
+        with monkeypatch.context() as denied:
+            denied.setattr(os, 'killpg', denied_killpg)
+            with pytest.raises(RuntimeError):
+                ledger.run_command([sys.executable, '-c',
+                                    'import os,pathlib,sys,time; pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(30)',
+                                    str(pid_file)], projected_seconds=1)
+            assert ledger.snapshot()['unfinished_attempts'], 'uncertain live work was marked finished'
+            ledger.close()
+            other = Ledger(ledger.path, local_config, clock=clock, sampler=lambda: dict(resources))
+            with pytest.raises(RuntimeError, match='cleanup'):
+                other.admit('G1', 1, 0)
+            other.close()
+    finally:
+        if pid_file.exists():
+            try:
+                original_killpg(int(pid_file.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+def test_terminal_group_cleanup_does_not_wait_or_require_signal_permission(monkeypatch):
+    from types import SimpleNamespace
+    import signed_study.budget as budget
+
+    monkeypatch.setattr(budget.psutil, 'pids', lambda: [123])
+    monkeypatch.setattr(budget.os, 'getpgid', lambda pid: 999)
+    monkeypatch.setattr(budget.psutil, 'Process', lambda pid: SimpleNamespace(status=lambda: budget.psutil.STATUS_ZOMBIE))
+
+    def denied_signal(pgid, sig):
+        raise PermissionError('terminal group cannot be signaled')
+
+    monkeypatch.setattr(budget.os, 'killpg', denied_signal)
+    result = budget._stop_command_group(SimpleNamespace(pid=999, poll=lambda: 0))
+    assert result['verified_no_live_members'] is True
+    assert result['terminal_pids'] == [123]
+    assert result['signals'] == []
