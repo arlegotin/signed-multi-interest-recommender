@@ -1,7 +1,7 @@
 # Signed preference study: implementation specification
 
 - Date: 2026-10-30.
-- Status: Builder checked; awaiting design approval. Implementation has not started.
+- Status: Approved by the user on 2026-10-30. Implementation has not started.
 - Source: [POC execution brief](../../blueprint.md), committed as `33347fe`.
 - Source SHA256: `dffa43017f2d1fe3518f30ff80c0ad28769f45376930f815128f04c305fee062`.
 
@@ -175,6 +175,8 @@ config/study.json              # fixed protocol and acquisition-resolved values
 src/signed_study/
   __init__.py
   __main__.py                  # command parsing and dispatch only
+  protocol.py                  # configuration, canonical hashes, protocol lock
+  budget.py                    # cumulative resource/attempt ledger
   data.py                      # acquisition, validation, episodes, outcome access
   embed.py                     # template, model provenance, embedding cache
   models.py                    # prototypes, geometric methods, sklearn adapters
@@ -460,10 +462,15 @@ the scientific protocol, resource caps, fallback rules, or evidence boundaries.
 A fresh research-software reviewer read this specification alongside the
 blueprint and reported: "nothing important left" that would prevent planning.
 This checks whether the written requirements are actionable; it is not executable
-validation or approval of the design by the user.
+validation. The user subsequently approved the specification and requested the
+implementation plan on 2026-10-30.
 
 The implementation proposals to review are the root package layout, separate
 outcome-loading boundary, append-only attempt ledger with a single writer,
 canonical lock plus digest sidecar, ignored local results with an aggregate
 allowlist, and the `>=` high-stratum boundary convention. Scientific choices
 remain those of the blueprint.
+
+Planning refinement: keep configuration/provenance in `protocol.py` and resource
+accounting in `budget.py` so that stage orchestration in `run.py` stays small.
+These split out existing responsibilities and do not change the approved protocol.
