@@ -42,7 +42,9 @@ def measured():
     # All seven families measured at endpoints, two observed support sizes.
     return {'user_measurements': [dict(family=family, support_count=support,
              positive_count=support-5, negative_count=5, candidate_count=20,
-             K=4, fit_seconds=.0001, score_seconds=.0001, write_seconds=.0001)
+             K=4, chunk_size=512, fit_seconds=.0001, score_seconds=.0001, write_seconds=.0001,
+             score_measurements={str(chunk):dict(score_seconds=.0001,write_seconds=.0001,
+                                overhead_seconds=0.,numerical_accepted=True) for chunk in (1,7,512)})
              for family in ('MeanNegative', 'SignedMax', 'AllExemplarMargin',
                             'PrototypeRatio', 'ExemplarRatio', 'LinearLogistic', 'RBFSVM')
              for support in (15, 64)], 'fixed_seconds': 1.,
@@ -97,3 +99,55 @@ def test_catalog_timing_forecast_uses_full_catalog_not_evaluation_candidates(loc
     small['catalog_items']=256
     large={**small,'catalog_items':3883}
     assert forecast_scale(large,cohort(),ledger)['seconds']['G5'] > 5*forecast_scale(small,cohort(),ledger)['seconds']['G5']
+
+
+def test_forecast_covers_ten_selected_families_and_three_matched_controls(local_config):
+    from signed_study.run import forecast_scale
+    ledger=SimpleNamespace(config=local_config,snapshot=lambda:{
+        'experimental_seconds':0.,'attempted_evaluations':0,
+        'stage_seconds':{s:0. for s in local_config.resources['stage_seconds']}})
+    measurements=measured()
+    measurements['optional_seconds']=0.
+    result=forecast_scale(measurements,cohort(),ledger)
+    assert result['reserved_evaluations']==65368
+    planning=result['planning']
+    assert planning['confirmation_entries']==13
+    assert planning['timing_evaluations']==2496
+    assert planning['numerical_diagnostic_evaluations']==704
+    assert {row['name'] for row in planning['comparison_schedule']}=={
+        'Centroid','PositiveMax','RocchioDirection','MeanNegative','SignedMax',
+        'AllExemplarMargin','PrototypeRatio','ExemplarRatio','LinearLogistic','RBFSVM',
+        'matched_MeanNegative','matched_PositiveMax','matched_K1_SignedMax'}
+
+
+def test_fallback_refuses_budget_that_covers_twelve_but_not_thirteen_entries(local_config):
+    from signed_study.run import forecast_scale
+    ledger=SimpleNamespace(config=local_config,snapshot=lambda:{
+        'experimental_seconds':0.,'attempted_evaluations':88000,
+        'stage_seconds':{s:0. for s in local_config.resources['stage_seconds']}})
+    measurements=measured()
+    measurements['optional_seconds']=0.
+    result=forecast_scale(measurements,cohort(62,225,'ml-100k'),ledger)
+    assert result['status']=='infeasible'
+
+
+@pytest.mark.parametrize('alternate',['slow','missing','invalid'])
+def test_reduced_chunk_requires_its_own_measured_costs(local_config,alternate):
+    from signed_study.run import forecast_scale
+    ledger=SimpleNamespace(config=local_config,snapshot=lambda:{
+        'experimental_seconds':0.,'attempted_evaluations':53000,
+        'stage_seconds':{s:0. for s in local_config.resources['stage_seconds']}})
+    measurements=measured()
+    fast=forecast_scale(measurements,cohort(),ledger)
+    assert fast['scale']==[256,1500]
+    for row in measurements['user_measurements']:
+        if alternate=='slow': row['score_measurements']['7']['score_seconds']=100.
+        elif alternate=='missing': del row['score_measurements']['7']
+        else: row['score_measurements']['7']['numerical_accepted']=False
+    result=forecast_scale(measurements,cohort(),ledger)
+    assert result['status']=='infeasible'
+    assert result['policy']['score_chunk_size']==7
+    if alternate in ('missing','invalid'):
+        assert 'remeasurement' in result['stop_reason']
+    else:
+        assert result['tested_scales']==[[418,1776],[256,1776],[418,1500],[256,1500],[418,1000],[256,1000]]

@@ -6,6 +6,23 @@ from .data import Episode, EpisodeStore
 from .models import initial_configurations
 
 
+def planned_comparison_schedule():
+    """All ten selected families and three controls before parameter selection.
+
+    Aliases retain declared evaluation slots even when computation is shared.
+    Later freeze/diagnostic consumers must resolve the actual parameters and
+    refresh costs; this preselection allowance does not certify a frozen plan.
+    """
+    aliases={'Centroid':'SignedMax','PositiveMax':'SignedMax','RocchioDirection':'MeanNegative'}
+    families=('Centroid','PositiveMax','RocchioDirection','MeanNegative','SignedMax',
+              'AllExemplarMargin','PrototypeRatio','ExemplarRatio','LinearLogistic','RBFSVM')
+    schedule=[{'name':name,'fit_family':aliases.get(name,name),'role':'selected'} for name in families]
+    schedule.extend({'name':name,'fit_family':family,'role':'matched_control'} for name,family in (
+        ('matched_MeanNegative','MeanNegative'),('matched_PositiveMax','SignedMax'),
+        ('matched_K1_SignedMax','SignedMax')))
+    return [{**slot,'geometric':slot['fit_family'] not in ('LinearLogistic','RBFSVM')} for slot in schedule]
+
+
 def user_digest(user_id):
     return hashlib.sha256(f'signed-study:{user_id}'.encode()).hexdigest()
 
@@ -58,12 +75,16 @@ def _score_units(family, positive, negative, candidates, K):
 def forecast_scale(measurements: dict, cohort: EpisodeStore, ledger) -> dict:
     """Forecast remaining G3/G4/G5 from actual capped support/candidate sizes.
 
-    Reserve 92 development entries, 12 selected/matched confirmation entries,
-    eight all-grid smoke users and 32x12x(1+5) timing evaluations. These are
+    Reserve 92 development entries, 13 selected/matched confirmation entries,
+    eight all-grid smoke users and 32x13x(1+5) timing evaluations. These are
     conservative planning reservations, not claims of executed fits.
     """
     config, state = ledger.config, ledger.snapshot()
     registry = initial_configurations(config)
+    schedule=planned_comparison_schedule()
+    comparison_entries=len(schedule)
+    timing_evaluations=config.timing['users']*comparison_entries*(config.timing['warmups']+config.timing['repetitions'])
+    numerical_evaluations=64*sum(slot['geometric'] for slot in schedule)
     families = {entry.family for entry in registry}
     rows = measurements['user_measurements']
     by_family = {family: [r for r in rows if r['family'] == family] for family in families}
@@ -76,6 +97,29 @@ def forecast_scale(measurements: dict, cohort: EpisodeStore, ledger) -> dict:
         if min(r['support_count'], r['candidate_count'], r['positive_count'], r['negative_count']) < 1:
             raise ValueError('Invalid calibration sizes')
 
+    def price_chunk(chunk):
+        priced={family:[] for family in families}
+        for row in rows:
+            if chunk==row.get('chunk_size',config.numerics['score_chunk_size']):
+                timing=row
+            else:
+                timing=row.get('score_measurements',{}).get(str(chunk))
+                if timing is None or timing.get('numerical_accepted') is not True:
+                    return None
+            if any(not math.isfinite(timing.get(key,float('nan'))) or timing[key]<0
+                   for key in ('score_seconds','write_seconds')):
+                return None
+            overhead=timing.get('overhead_seconds',0.)
+            if not math.isfinite(overhead) or overhead<0:
+                return None
+            priced[row['family']].append({**row,'score_seconds':timing['score_seconds'],
+                                          'write_seconds':timing['write_seconds'],'overhead_seconds':overhead})
+        return priced
+
+    by_family=price_chunk(config.numerics['score_chunk_size'])
+    if by_family is None:
+        raise ValueError('Canonical scoring chunk requires measured costs')
+
     def cost(e, entry, candidate_count=None):
         observed = by_family[entry.family]
         h = e.history
@@ -87,10 +131,12 @@ def forecast_scale(measurements: dict, cohort: EpisodeStore, ledger) -> dict:
         return (_fit_cost(observed, len(h.positive_ids)+len(h.negative_ids)) + units*rate
                 + max(r['write_seconds'] + r.get('overhead_seconds',0.) for r in observed))
 
+    def comparison_cost(e,candidate_count=None,*,geometric_only=False):
+        maxima={family:max(cost(e,c,candidate_count) for c in registry if c.family==family) for family in families}
+        return sum(maxima[slot['fit_family']] for slot in schedule if not geometric_only or slot['geometric'])
+
     dev = sorted(cohort.development, key=lambda e: user_digest(e.history.user_id))
     confirm = sorted(cohort.confirmation, key=lambda e: user_digest(e.history.user_id))
-    dev_cost = [sum(cost(e, c) for c in registry) + 14*max(cost(e, c) for c in registry) for e in dev]
-    conf_cost = [12*max(cost(e, c) for c in registry) for e in confirm]
     scales = ([list(config.calibration['fallback_scale_pair'])] if cohort.audit['dataset'] == 'ml-100k'
               else [list(p) for p in config.calibration['primary_scale_pairs']])
     if cohort.audit['dataset'] not in ('ml-1m', 'ml-100k'):
@@ -98,26 +144,33 @@ def forecast_scale(measurements: dict, cohort: EpisodeStore, ledger) -> dict:
     caps = config.resources
     margin = caps['safety_multiplier']
     result = dict(status='infeasible', scale=None, safety_multiplier=margin, tested_scales=[],
+                  cost_chunk_size=config.numerics['score_chunk_size'],
                   adjustments=[], policy=dict(embedding_batch_size=config.encoder['batch_size'],
                   score_chunk_size=config.numerics['score_chunk_size'], blas_threads=config.timing['blas_threads'],
-                  inference_workers=1), planning=dict(development_entries=92, confirmation_entries=12,
-                  smoke_users=8, smoke_entries=78, timing_evaluations=2304,
-                  numerical_diagnostic_evaluations=320),
+                  inference_workers=1), planning=dict(development_entries=92, confirmation_entries=comparison_entries,
+                  comparison_schedule=schedule,smoke_users=8, smoke_entries=78, timing_evaluations=timing_evaluations,
+                  numerical_diagnostic_evaluations=numerical_evaluations),
                   support_model='upper observed size-bin envelope plus measured nonnegative slope',
                   stop_reason='Smallest permitted scale cannot fit remaining allocations and reserve')
     fixed = measurements.get('fixed_seconds', 0.)
     catalog_items=measurements.get('catalog_items',3883 if cohort.audit['dataset']=='ml-1m' else 1682)
     if type(catalog_items) is not int or catalog_items<=0:
         raise ValueError('Measured catalog size must be positive')
-    timing = 2304 * max((max(cost(e,c,catalog_items) for c in registry) for e in dev[:32]),default=0.)
-    numerical = 320 * max((max(cost(e,c) for c in registry) for e in confirm[:64]),default=0.)
-    smoke_seconds=sum(dev_cost[:8])
+    timing_users=set(select_calibration_users(list(dev)))
+    def reprice():
+        development=[sum(cost(e,c) for c in registry)+14*max(cost(e,c) for c in registry) for e in dev]
+        confirmation=[comparison_cost(e) for e in confirm]
+        timing=(config.timing['warmups']+config.timing['repetitions'])*sum(
+            comparison_cost(e,catalog_items) for e in dev if e.history.user_id in timing_users)
+        numerical=sum(comparison_cost(e,geometric_only=True) for e in confirm[:64])
+        return development,confirmation,timing,numerical,sum(development[:8])
+    dev_cost,conf_cost,timing,numerical,smoke_seconds=reprice()
 
     def projection(pair, optional):
         d, c = pair
         seconds = {'G3': sum(dev_cost[:d]) + smoke_seconds + fixed,
                    'G4': sum(conf_cost[:c]) + fixed, 'G5': timing + numerical + fixed + optional}
-        evaluations = d*92 + c*12 + 624 + 2304 + 320 + (4200 if optional else 0)
+        evaluations = d*92 + c*comparison_entries + 624 + timing_evaluations + numerical_evaluations + (4200 if optional else 0)
         fits = (d <= len(dev) and c <= len(confirm)
                 and state['attempted_evaluations']+evaluations <= caps['evaluation_limit']
                 and all(state['stage_seconds'][s]+margin*t <= caps['stage_seconds'][s] for s,t in seconds.items())
@@ -144,6 +197,13 @@ def forecast_scale(measurements: dict, cohort: EpisodeStore, ledger) -> dict:
         if not measurements.get('chunk_invariance'):
             result['stop_reason'] = 'Reduced scoring chunk lacks invariance evidence'
             return result
+        proposed=price_chunk(result['policy']['score_chunk_size'])
+        if proposed is None:
+            result['stop_reason']='Proposed scoring chunk needs complete valid timing remeasurement'
+            return result
+        by_family=proposed
+        dev_cost,conf_cost,timing,numerical,smoke_seconds=reprice()
+        result['cost_chunk_size']=result['policy']['score_chunk_size']
     for pair in scales:
         result['tested_scales'].append(pair)
         fits, seconds, evaluations = projection(pair, optional)

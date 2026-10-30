@@ -29,6 +29,42 @@ def calibration_entries(config):
     return entries
 
 
+def numerical_variation(reference,repeated,item_ids,*,eta):
+    """Check the declared score/order contract using O(n) scratch memory.
+
+    Pair ordering includes creation/removal of exact score ties. Log bounded
+    item-ID examples and exact counts, rather than an unbounded pair matrix or
+    a list of every near-tie change. Reference gaps exactly 2*eta are near ties.
+    """
+    reference=np.asarray(reference,dtype=np.float64)
+    repeated=np.asarray(repeated,dtype=np.float64)
+    ids=np.asarray(item_ids)
+    if (reference.ndim!=1 or repeated.shape!=reference.shape or ids.shape!=reference.shape
+            or not np.isfinite(reference).all() or not np.isfinite(repeated).all()
+            or not np.isfinite(eta) or eta<0):
+        raise ValueError('Numerical comparison needs aligned finite vectors and nonnegative eta')
+    difference=float(np.max(np.abs(reference-repeated),initial=0.))
+    near=distant=0
+    examples=[]
+    for i in range(len(reference)-1):
+        gaps=reference[i]-reference[i+1:]
+        repeated_gaps=repeated[i]-repeated[i+1:]
+        changed=np.sign(gaps)!=np.sign(repeated_gaps)
+        close=np.abs(gaps)<=2*eta
+        near_mask=changed & close
+        near+=int(np.count_nonzero(near_mask))
+        distant+=int(np.count_nonzero(changed & ~close))
+        if len(examples)<32:
+            for offset in np.flatnonzero(near_mask)[:32-len(examples)]:
+                examples.append({'item_ids':[int(ids[i]),int(ids[i+1+offset])],
+                                 'reference_gap':float(gaps[offset]),
+                                 'repeated_gap':float(repeated_gaps[offset])})
+    return {'accepted':difference<=eta and distant==0,'tolerance':eta,
+            'max_absolute_difference':difference,'pairwise_order_accepted':distant==0,
+            'distant_order_changes':distant,'near_tie_order_changes':near,
+            'near_tie_examples':examples,'near_tie_examples_truncated':near>len(examples)}
+
+
 def measure_users(store,cache,users,config,ledger,*,numerical_checks,output_path):
     """One admitted batch. Load each user's development labels exactly once.
 
@@ -108,32 +144,41 @@ def measure_users(store,cache,users,config,ledger,*,numerical_checks,output_path
                 journal(row)
                 write_seconds=(time.perf_counter_ns()-start)/1e9
                 overhead_seconds=max(0.,(time.perf_counter_ns()-boundary_start)/1e9-fit_seconds-score_seconds-write_seconds)
-                result['user_measurements'].append(dict(user_id=uid,family=entry.family,
+                measured=dict(user_id=uid,family=entry.family,
                     configuration_id=entry.id,parameters=entry.parameters,K=entry.parameters.get('K',4),
                     support_count=len(episode.history.positive_ids)+len(episode.history.negative_ids),
                     positive_count=len(episode.history.positive_ids),negative_count=len(episode.history.negative_ids),
                     candidate_count=len(episode.candidate_ids),fit_seconds=fit_seconds,score_seconds=score_seconds,
-                    write_seconds=write_seconds,overhead_seconds=overhead_seconds+input_seconds/len(entries)))
+                    write_seconds=write_seconds,overhead_seconds=overhead_seconds+input_seconds/len(entries),
+                    chunk_size=chunk,score_measurements={str(chunk):dict(score_seconds=score_seconds,
+                        write_seconds=write_seconds,overhead_seconds=overhead_seconds+input_seconds/len(entries),
+                        numerical_accepted=True)})
+                result['user_measurements'].append(measured)
                 row['write_seconds']=write_seconds
                 if numerical_checks:
                     for alternate in config.numerics['score_chunk_sizes_check']:
                         if alternate==chunk:
                             continue
+                        repeat_start=time.perf_counter_ns()
                         check=start_attempt(uid,entry,'score_repeat',alternate)
+                        repeat_overhead=(time.perf_counter_ns()-repeat_start)/1e9
                         try:
                             start=time.perf_counter_ns()
                             repeated=score_user(model,episode.candidate_ids,cache,chunk_size=alternate)
                             repeated_metrics=evaluate_user(repeated,labels,episode.candidate_ids)
-                            difference=float(np.max(np.abs(scores-repeated)))
-                            tolerance=config.numerics['score_tolerance_factor']*(1+2*entry.parameters.get('lambda',0))
-                            accepted=difference<=tolerance
+                            repeated_score_seconds=(time.perf_counter_ns()-start)/1e9
+                            diagnostic_start=time.perf_counter_ns()
+                            tolerance=config.numerics['score_tolerance_factor']*(1+entry.parameters.get('lambda',0))
+                            variation=numerical_variation(scores,repeated,episode.candidate_ids,eta=tolerance)
+                            accepted=variation['accepted']
                             check.update(status='completed' if accepted else 'failed',
-                                score_seconds=(time.perf_counter_ns()-start)/1e9,max_absolute_difference=difference,
-                                tolerance=tolerance,metrics=repeated_metrics,
+                                score_seconds=repeated_score_seconds,
+                                diagnostic_seconds=(time.perf_counter_ns()-diagnostic_start)/1e9,
+                                **variation,metrics=repeated_metrics,
                                 metric_difference={k:repeated_metrics[k]-metrics[k] for k in metrics})
                             if not accepted:
                                 result['chunk_invariance']=False
-                                repair('numerical_investigation','Chunk score variation exceeds the fixed tolerance')
+                                repair('numerical_investigation','Chunk score variation or pair ordering violates the declared contract')
                         except BudgetExceeded:
                             check.update(status='interrupted',diagnostics=model.diagnostics)
                             raise
@@ -142,7 +187,13 @@ def measure_users(store,cache,users,config,ledger,*,numerical_checks,output_path
                             result['chunk_invariance']=False
                             repair('numerical_investigation','Repeated scoring failed')
                         finally:
+                            write_start=time.perf_counter_ns()
                             journal(check)
+                            check['write_seconds']=(time.perf_counter_ns()-write_start)/1e9
+                            measured['score_measurements'][str(alternate)]=dict(
+                                score_seconds=check.get('score_seconds',0.),write_seconds=check['write_seconds'],
+                                overhead_seconds=max(measured['overhead_seconds'],repeat_overhead),
+                                numerical_accepted=check['status']=='completed')
             except BudgetExceeded:
                 row.update(status='interrupted',diagnostics={} if model is None else model.diagnostics)
                 result['status']='interrupted'
@@ -165,6 +216,8 @@ def measure_users(store,cache,users,config,ledger,*,numerical_checks,output_path
         for measured in result['user_measurements']:
             if measured['user_id']==uid:
                 measured['overhead_seconds']+=overhead
+                for timing in measured['score_measurements'].values():
+                    timing['overhead_seconds']+=overhead
     result['prototype_cap_user_fraction']=len(cap_users)/len(users) if users else 0.
     if result['prototype_cap_user_fraction']>config.prototype['cap_hit_inspection_fraction']:
         repair('prototype_trace_inspection','More than 5% of calibration users hit prototype cap; inspect objective traces')
