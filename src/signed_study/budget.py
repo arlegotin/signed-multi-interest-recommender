@@ -333,6 +333,7 @@ class Ledger:
         stages = {stage: 0.0 for stage in self.config.resources['stage_seconds']}
         state = dict(schema_version=1, attempted_evaluations=0, experimental_seconds=0.0,
                      setup_seconds=0.0, stage_seconds=stages, repair_cycles=0, peak_rss_bytes=0,
+                     stage_limits=dict(self.config.resources['stage_seconds']), reallocations=[],
                      baseline_disk_bytes=0, peak_project_disk_bytes=0, initial_free_disk_bytes=None, resources_sha256=None,
                      report_reserve_seconds=self.config.resources['report_reserve_seconds'],
                      attempts={}, unfinished_attempts={}, bootstrap_ids=[], events=rows)
@@ -353,6 +354,9 @@ class Ledger:
                 attempt.update(row)
             elif event == 'overhead':
                 self._charge(state, row['stage'], row['elapsed_seconds'])
+            elif event == 'reallocate':
+                state['stage_limits'] = self._reallocated_limits(state, row)
+                state['reallocations'].append(dict(row))
             sample = row.get('measurements', {})
             state['peak_rss_bytes'] = max(state['peak_rss_bytes'], sample.get('rss_bytes', 0))
             state['peak_project_disk_bytes'] = max(state['peak_project_disk_bytes'], sample.get('project_disk_bytes', 0))
@@ -378,6 +382,66 @@ class Ledger:
         rows, _ = _read_events(self.path)
         return self._state(rows)
 
+    @staticmethod
+    def _reallocated_limits(state, row):
+        """Validate the same bounded transfer on write and chronological replay."""
+        fields = {'schema_version', 'event', 'recorded_at', 'event_id',
+                  'source_stage', 'target_stage', 'seconds', 'reason'}
+        if (set(row) != fields or type(row['schema_version']) is not int
+                or row['schema_version'] != 1 or row['event'] != 'reallocate'
+                or not isinstance(row['event_id'], str) or not row['event_id'].strip()
+                or type(row['recorded_at']) not in (int, float)
+                or not math.isfinite(row['recorded_at'])):
+            raise ValueError('Invalid reallocation record')
+        if any(previous['event_id'] == row['event_id'] for previous in state['reallocations']):
+            raise ValueError('Duplicate reallocation event ID')
+        source, target, seconds = row['source_stage'], row['target_stage'], row['seconds']
+        if source not in ('G0', 'G2', 'G3', 'G4', 'G5') or target != 'G1':
+            raise ValueError('Reallocation requires a normal distinct donor and G1 target')
+        if (type(seconds) not in (int, float) or seconds <= 0
+                or seconds >= state['stage_limits'][source] or not math.isfinite(seconds)):
+            raise ValueError('Reallocation seconds must be finite, positive and below donor allocation')
+        if not isinstance(row['reason'], str) or not row['reason'].strip():
+            raise ValueError('Reallocation requires a nonempty reason')
+        if state['resources_sha256'] is None:
+            raise ValueError('Reallocation requires an initialized ledger')
+        for attempt in state['attempts'].values():
+            if attempt['stage'] == source or attempt['stage'] in ('G2', 'G3', 'G4', 'G5'):
+                raise ValueError('Donor or downstream workload has already been admitted')
+            if attempt['status'] == 'unfinished':
+                raise ValueError('Reallocation cannot overlap unfinished work')
+        limits = dict(state['stage_limits'])
+        limits[source] -= seconds
+        limits[target] += seconds
+        if (limits[source] <= state['stage_seconds'][source]
+                or limits[source] >= state['stage_limits'][source]
+                or limits[target] <= state['stage_limits'][target]
+                or not math.isfinite(limits[target])
+                or math.fsum(limits.values()) != math.fsum(state['stage_limits'].values())):
+            raise ValueError('Reallocation must conserve capacity and leave positive donor capacity')
+        return limits
+
+    def reallocate(self, source_stage: str, target_stage: str, seconds: float, reason: str) -> str:
+        """Durably move unused donor capacity to preliminary G1 validation.
+
+        Only an unadmitted G0/G2–G5 donor is supported, before any G2–G5
+        admission. The existing workload lock protects initialization, replay,
+        validation and fsync; this never changes configured caps or usage.
+        """
+        with self._critical():
+            self._acquire()
+            try:
+                self._initialize()
+                event_id = str(uuid.uuid4())
+                fields = dict(event_id=event_id, source_stage=source_stage,
+                              target_stage=target_stage, seconds=seconds, reason=reason)
+                row = dict(schema_version=1, event='reallocate', recorded_at=self.wall_clock(), **fields)
+                self._reallocated_limits(self._state(self._cached), row)
+                self._append('reallocate', **fields)
+                return event_id
+            finally:
+                self._release()
+
     def _limits(self, state, stage, projected, evaluations, sample, admission=False):
         caps = self.config.resources
         if sample['rss_bytes'] > min(caps['rss_bytes'], sample['installed_ram_bytes'] * caps['rss_ram_fraction']):
@@ -402,7 +466,7 @@ class Ledger:
             raise BudgetExceeded('Protected report reserve would be consumed')
         if total > caps['experimental_seconds']:
             raise BudgetExceeded('Experimental time cap exceeded')
-        if state['stage_seconds'][stage] + projected > caps['stage_seconds'][stage]:
+        if state['stage_seconds'][stage] + projected > state['stage_limits'][stage]:
             raise BudgetExceeded(f'{stage} stage time allocation exceeded')
         if stage == 'repair' and admission and state['repair_cycles'] >= caps['repair_cycles']:
             raise BudgetExceeded('Material repair cycles exhausted')

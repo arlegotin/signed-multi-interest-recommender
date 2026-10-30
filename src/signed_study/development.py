@@ -149,8 +149,13 @@ def refresh_selected_forecast(result,store,timings,config,ledger,calibration):
     evaluations={'G4':len(planned)*len(entries),
                  'G5':len(timing_users)*len(entries)*repeats+len(numerical)*len(geometric)}
     state=ledger.snapshot(); caps=config.resources; margin=caps['safety_multiplier']
+    stage_limits=state.get('stage_limits')
+    if stage_limits is None:
+        if state.get('reallocations'):
+            raise ValueError('Transfer history requires effective stage limits')
+        stage_limits=caps['stage_seconds']  # Legacy synthetic ledger fixtures.
     feasible=(state['attempted_evaluations']+sum(evaluations.values())<=caps['evaluation_limit']
-              and all(state['stage_seconds'][s]+margin*t<=caps['stage_seconds'][s] for s,t in seconds.items())
+              and all(state['stage_seconds'][s]+margin*t<=stage_limits[s] for s,t in seconds.items())
               and state['experimental_seconds']+margin*sum(seconds.values())<=caps['experimental_seconds']-caps['report_reserve_seconds'])
     # The frozen schedule cannot exceed the preselected slot allowances.
     allowance=calibration['forecast']['planning']

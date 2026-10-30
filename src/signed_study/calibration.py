@@ -142,6 +142,11 @@ def forecast_scale(measurements: dict, cohort: EpisodeStore, ledger) -> dict:
     if cohort.audit['dataset'] not in ('ml-1m', 'ml-100k'):
         raise ValueError('Production forecast requires official dataset provenance')
     caps = config.resources
+    stage_limits = state.get('stage_limits')
+    if stage_limits is None:
+        if state.get('reallocations'):
+            raise ValueError('Transfer history requires effective stage limits')
+        stage_limits = caps['stage_seconds']  # Legacy synthetic ledger fixtures.
     margin = caps['safety_multiplier']
     result = dict(status='infeasible', scale=None, safety_multiplier=margin, tested_scales=[],
                   cost_chunk_size=config.numerics['score_chunk_size'],
@@ -173,7 +178,7 @@ def forecast_scale(measurements: dict, cohort: EpisodeStore, ledger) -> dict:
         evaluations = d*92 + c*comparison_entries + 624 + timing_evaluations + numerical_evaluations + (4200 if optional else 0)
         fits = (d <= len(dev) and c <= len(confirm)
                 and state['attempted_evaluations']+evaluations <= caps['evaluation_limit']
-                and all(state['stage_seconds'][s]+margin*t <= caps['stage_seconds'][s] for s,t in seconds.items())
+                and all(state['stage_seconds'][s]+margin*t <= stage_limits[s] for s,t in seconds.items())
                 and state['experimental_seconds']+margin*sum(seconds.values()) <=
                     caps['experimental_seconds']-caps['report_reserve_seconds'])
         return fits, seconds, evaluations
