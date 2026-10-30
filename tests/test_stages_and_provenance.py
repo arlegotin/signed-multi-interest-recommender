@@ -5,8 +5,283 @@ import json
 from pathlib import Path
 
 import pytest
+import numpy as np
 
 from signed_study.protocol import StudyConfig, VerifiedProtocol, canonical_sha256, load_config
+
+
+def test_template_and_cache_provenance(embedding_inputs, deterministic_encoder):
+    from signed_study.embed import encode_items, expected_embedding_manifest, format_movie, load_embedding_cache
+
+    assert format_movie("Toy Story (1995)", ["Comedy", "Animation"]) == (
+        "Movie: Toy Story (1995). Genres: Animation, Comedy.")
+    cache = encode_items(**embedding_inputs, encoder=deterministic_encoder)
+    assert cache.item_ids.tolist() == [2, 9]
+    assert cache.vectors.dtype == np.float64
+    np.testing.assert_allclose(np.linalg.norm(cache.vectors, axis=1), 1., atol=1e-12)
+    np.testing.assert_allclose(cache.rows([9, 2, 9])[:, :2], [[.8, .6], [.6, .8], [.8, .6]])
+    with pytest.raises(KeyError):
+        cache.rows([99])
+    with pytest.raises(ValueError):
+        cache.vectors[0, 0] = 99
+    path = embedding_inputs["config"].paths["cache"] / "embeddings"
+    expected = expected_embedding_manifest(**embedding_inputs)
+    loaded = load_embedding_cache(path, expected)
+    np.testing.assert_array_equal(cache.vectors, loaded.vectors)
+    assert np.load(path / "vectors.npy", allow_pickle=False).dtype == np.float32
+    assert cache.manifest["accounting"] == {
+        "items": 2, "tokens_before_truncation": 312, "tokens_after_truncation": 268,
+        "truncated_items": 1, "discarded_tokens": 44, "maximum_tokens": 300}
+
+
+@pytest.mark.parametrize("field", ["model_revision", "template", "dataset_manifest", "item_ids", "shape", "dtype"])
+def test_embedding_cache_rejects_changed_provenance(embedding_inputs, deterministic_encoder, field):
+    import copy
+    from signed_study.embed import encode_items, expected_embedding_manifest, load_embedding_cache
+
+    encode_items(**embedding_inputs, encoder=deterministic_encoder)
+    expected = copy.deepcopy(expected_embedding_manifest(**embedding_inputs))
+    replacements = {"model_revision": "b" * 40, "template": "Changed template", "dataset_manifest": {"changed": True},
+                    "item_ids": [9, 2], "shape": [3, 384], "dtype": "float64"}
+    expected["inputs"][field] = replacements[field]
+    expected["input_sha256"] = canonical_sha256(expected["inputs"])
+    with pytest.raises(ValueError, match="provenance"):
+        load_embedding_cache(embedding_inputs["config"].paths["cache"] / "embeddings", expected)
+
+
+@pytest.mark.parametrize("damage", ["bytes", "dtype", "shape", "order", "missing", "temporary", "manifest"])
+def test_embedding_cache_rejects_corruption_and_partial_outputs(embedding_inputs, deterministic_encoder, damage):
+    from signed_study.embed import encode_items, expected_embedding_manifest, load_embedding_cache
+
+    encode_items(**embedding_inputs, encoder=deterministic_encoder)
+    path = embedding_inputs["config"].paths["cache"] / "embeddings"
+    target = path / "vectors.npy"
+    array = np.load(target, allow_pickle=False)
+    if damage == "bytes":
+        array[0, 0] += 1
+        np.save(target, array)
+    elif damage == "dtype":
+        np.save(target, array.astype(np.float64))
+    elif damage == "shape":
+        np.save(target, array[:, :2])
+    elif damage == "order":
+        np.save(path / "item_ids.npy", np.array([9, 2], dtype=np.int64))
+    elif damage == "missing":
+        target.unlink()
+    elif damage == "temporary":
+        (path / "manifest.json").rename(path / "manifest.json.tmp")
+    else:
+        manifest = json.loads((path / "manifest.json").read_text())
+        manifest["accounting"]["items"] = 99
+        (path / "manifest.json").write_text(json.dumps(manifest))
+    with pytest.raises(ValueError):
+        load_embedding_cache(path, expected_embedding_manifest(**embedding_inputs))
+
+
+@pytest.mark.parametrize("bad", [0., np.nan, np.inf])
+def test_embedding_rejects_invalid_vectors(embedding_inputs, deterministic_encoder, monkeypatch, bad):
+    from signed_study.embed import encode_items
+
+    monkeypatch.setattr(deterministic_encoder, "encode", lambda texts, **kwargs: np.full((len(texts), 384), bad, dtype=np.float32))
+    with pytest.raises(ValueError, match="vector"):
+        encode_items(**embedding_inputs, encoder=deterministic_encoder)
+    assert not (embedding_inputs["config"].paths["cache"] / "embeddings" / "manifest.json").exists()
+
+
+def test_embedding_requires_explicit_resolved_revision_and_unchanged_files(embedding_inputs, deterministic_encoder):
+    from dataclasses import replace
+    from signed_study.embed import encode_items
+
+    config = embedding_inputs.pop("config")
+    with pytest.raises(ValueError, match="revision"):
+        encode_items(**embedding_inputs, config=replace(config, model_revision=None), encoder=deterministic_encoder)
+    model = Path(embedding_inputs["encoder_provenance"]["model_path"])
+    (model / "model.safetensors").write_bytes(b"changed weights")
+    with pytest.raises(ValueError, match="model file"):
+        encode_items(**embedding_inputs, config=config, encoder=deterministic_encoder)
+
+
+def test_embedding_rejects_unmanifested_model_configuration(embedding_inputs, deterministic_encoder):
+    from signed_study.embed import encode_items
+
+    model = Path(embedding_inputs["encoder_provenance"]["model_path"])
+    (model / "sentence_bert_config.json").write_text('{"max_seq_length":128}')
+    with pytest.raises(ValueError, match="model file"):
+        encode_items(**embedding_inputs, encoder=deterministic_encoder)
+
+
+def test_embedding_probe_repeatability_and_reuse(embedding_inputs, deterministic_encoder):
+    from signed_study.embed import encode_items, encode_probe, check_repeatability
+
+    probe = encode_probe(**embedding_inputs, encoder=deterministic_encoder, item_ids=[9])
+    assert probe.item_ids.tolist() == [9]
+    assert not (embedding_inputs["config"].paths["cache"] / "embeddings").exists()
+    assert check_repeatability(probe.vectors, probe.vectors)["accepted"]
+    assert check_repeatability(np.zeros((1, 384)), np.full((1, 384), 1e-5))["accepted"]
+    with pytest.raises(ValueError, match="repeat"):
+        check_repeatability(np.zeros((1, 384)), np.full((1, 384), np.nextafter(1e-5, np.inf)))
+    cache = encode_items(**embedding_inputs, encoder=deterministic_encoder)
+
+    class Unavailable:
+        def encode(self, *args, **kwargs):
+            raise AssertionError("Complete matching cache should skip encoder")
+
+    repeated = encode_items(**embedding_inputs, encoder=Unavailable())
+    np.testing.assert_array_equal(repeated.vectors, cache.vectors)
+
+
+def test_resolve_encoder_pins_allowlisted_public_files(embedding_inputs, monkeypatch):
+    from types import SimpleNamespace
+    from dataclasses import replace
+    from signed_study.embed import resolve_encoder
+
+    config = replace(embedding_inputs["config"], model_revision=None)
+    model = Path(embedding_inputs["encoder_provenance"]["model_path"])
+    files = list(embedding_inputs["encoder_provenance"]["files"])
+    files += ["onnx/model.onnx", "openvino/openvino_model.xml", "pytorch_model.bin", "custom.py"]
+    calls = []
+
+    class API:
+        def model_info(self, repo_id, **kwargs):
+            assert repo_id == config.model_id and kwargs["token"] is False
+            return SimpleNamespace(sha="a" * 40, siblings=[SimpleNamespace(rfilename=f) for f in files],
+                                   card_data={"license": "apache-2.0"})
+
+    def download(**kwargs):
+        calls.append(kwargs)
+        return str(model)
+
+    result = resolve_encoder(config, api=API(), download=download)
+    assert config.model_revision is None
+    assert result["model_revision"] == "a" * 40
+    assert result["files"] == embedding_inputs["encoder_provenance"]["files"]
+    assert calls[0]["revision"] == "a" * 40
+    assert calls[0]["token"] is False and calls[0]["max_workers"] == 1
+    assert set(calls[0]["allow_patterns"]) == set(result["files"])
+    assert Path(calls[0]["cache_dir"]).is_relative_to(config.paths["cache"].resolve())
+    (model / "modules.json").write_text('[{"type":"custom.RemoteCode","path":""}]')
+    with pytest.raises(ValueError, match="architecture"):
+        resolve_encoder(config, api=API(), download=download)
+
+
+def test_embedding_module_import_is_lazy(tmp_path):
+    import subprocess
+    import sys
+
+    code = "import sys; import signed_study.embed; assert not {'torch', 'sentence_transformers', 'huggingface_hub'} & sys.modules.keys()"
+    subprocess.run([sys.executable, "-c", code], check=True)
+
+
+def test_embedding_local_cpu_boundary_is_frozen_and_accounts_actual_tokens(embedding_inputs, monkeypatch):
+    import sys
+    from types import SimpleNamespace
+    from signed_study.embed import load_encoder
+
+    state = {"grad": True, "frozen": False}
+    float32 = object()
+
+    class NoGrad:
+        def __enter__(self):
+            state["grad"] = False
+
+        def __exit__(self, *args):
+            state["grad"] = True
+
+    class Model:
+        def __init__(self, path, **kwargs):
+            assert path == embedding_inputs["encoder_provenance"]["model_path"]
+            assert kwargs["device"] == "cpu" and kwargs["local_files_only"]
+            assert kwargs["trust_remote_code"] is False and kwargs["token"] is False
+            assert kwargs["backend"] == "torch" and kwargs["model_kwargs"]["dtype"] is float32
+            assert Path(kwargs["cache_folder"]).is_relative_to(embedding_inputs["config"].paths["cache"].resolve())
+
+        def to(self, *, device, dtype):
+            assert device == "cpu" and dtype is float32
+
+        def eval(self):
+            self.evaluation = True
+
+        def parameters(self):
+            def requires_grad_(value):
+                state["frozen"] = value is False
+            return [SimpleNamespace(requires_grad_=requires_grad_)]
+
+        def get_sentence_embedding_dimension(self):
+            return 384
+
+        def tokenizer(self, texts, **kwargs):
+            assert kwargs == {"add_special_tokens": True, "truncation": False, "padding": False}
+            return {"input_ids": [list(range(300)) for text in texts]}
+
+        def encode(self, texts, **kwargs):
+            assert state["grad"] is False and state["frozen"] and self.evaluation
+            assert self.max_seq_length == 256
+            assert kwargs["batch_size"] == 32 and kwargs["precision"] == "float32"
+            assert kwargs["device"] == "cpu" and kwargs["normalize_embeddings"] is False
+            assert kwargs["prompt"] == ""
+            return np.ones((len(texts), 384), dtype=np.float32)
+
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(float32=float32, no_grad=NoGrad))
+    monkeypatch.setitem(sys.modules, "sentence_transformers", SimpleNamespace(SentenceTransformer=Model))
+    encoder = load_encoder(embedding_inputs["config"], embedding_inputs["encoder_provenance"])
+    assert encoder.token_lengths(["one"]) == [300]
+    assert encoder.encode(["one"], batch_size=32).shape == (1, 384)
+
+
+def test_embedding_atomic_write_failure_and_abandoned_temporary(embedding_inputs, deterministic_encoder, monkeypatch):
+    from signed_study.embed import encode_items
+
+    root = embedding_inputs["config"].paths["cache"]
+    abandoned = root / ".embeddings.tmp-interrupted"
+    abandoned.mkdir()
+    np.save(abandoned / "vectors.npy", np.zeros((2, 384), dtype=np.float32))
+    original = Path.rename
+
+    def interrupted(path, target):
+        if Path(target).name == "embeddings":
+            raise OSError("injected interrupt before directory commit")
+        return original(path, target)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "rename", interrupted)
+        with pytest.raises(OSError, match="injected interrupt"):
+            encode_items(**embedding_inputs, encoder=deterministic_encoder)
+    assert not (root / "embeddings").exists()
+    assert list(root.glob(".embeddings.tmp-*")) == [abandoned]
+    cache = encode_items(**embedding_inputs, encoder=deterministic_encoder)
+    np.testing.assert_allclose(cache.vectors[:, :2], [[.6, .8], [.8, .6]])
+
+
+def test_embedding_provenance_binds_text_but_not_later_scoring(embedding_inputs, deterministic_encoder):
+    from dataclasses import replace
+    from signed_study.data import Movie
+    from signed_study.embed import encode_items, expected_embedding_manifest, load_embedding_cache
+
+    cache = encode_items(**embedding_inputs, encoder=deterministic_encoder)
+    changed = dict(embedding_inputs)
+    changed["config"] = replace(changed["config"], prototype={"max_updates": 100})
+    assert expected_embedding_manifest(**changed)["input_sha256"] == cache.manifest["input_sha256"]
+    changed["metadata"] = {**changed["metadata"], 9: Movie(9, "Changed title", ("Drama",))}
+    with pytest.raises(ValueError, match="provenance"):
+        load_embedding_cache(embedding_inputs["config"].paths["cache"] / "embeddings", expected_embedding_manifest(**changed))
+    with pytest.raises(ValueError, match="provenance"):
+        load_embedding_cache(embedding_inputs["config"].paths["cache"] / "embeddings", {"schema_version": 1})
+
+
+@pytest.mark.parametrize("revision", [None, "main", "a" * 39, "A" * 40, "b" * 40])
+def test_resolve_encoder_rejects_unpinned_or_mismatched_api_revision(embedding_inputs, revision):
+    from types import SimpleNamespace
+    from signed_study.embed import resolve_encoder
+
+    class API:
+        def model_info(self, *args, **kwargs):
+            return SimpleNamespace(sha=revision)
+
+    def no_download(**kwargs):
+        raise AssertionError("Invalid API revision must fail before any download")
+
+    with pytest.raises(ValueError, match="revision"):
+        resolve_encoder(embedding_inputs["config"], api=API(), download=no_download)
 
 
 def test_fixed_protocol_and_canonical_hash(study_config_path):

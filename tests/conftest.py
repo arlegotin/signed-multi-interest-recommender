@@ -116,3 +116,59 @@ def local_config(tmp_path, monkeypatch, study_config_path):
 
     monkeypatch.chdir(tmp_path)
     return load_config(study_config_path)
+
+
+@pytest.fixture
+def deterministic_encoder():
+    """No model imports/downloads; token counts intentionally exceed the limit."""
+    import numpy as np
+
+    class Encoder:
+        def token_lengths(self, texts):
+            return [300 if "Long" in text else 12 for text in texts]
+
+        def encode(self, texts, *, batch_size):
+            result = np.zeros((len(texts), 384), dtype=np.float32)
+            for row, text in zip(result, texts):
+                row[:2] = [3, 4] if "Toy" in text else [4, 3]
+            return result
+
+    return Encoder()
+
+
+@pytest.fixture
+def embedding_inputs(local_config, tmp_path):
+    from dataclasses import replace
+    from signed_study.data import Movie
+    from signed_study.protocol import canonical_sha256
+
+    model = tmp_path / ".cache" / "models" / "synthetic"
+    model.mkdir(parents=True)
+    files = {
+        "modules.json": '[{"idx":0,"name":"0","path":"","type":"sentence_transformers.models.Transformer"},'
+                        '{"idx":1,"name":"1","path":"1_Pooling","type":"sentence_transformers.models.Pooling"}]',
+        "config.json": '{"model_type":"bert","hidden_size":384}',
+        "1_Pooling/config.json": '{"word_embedding_dimension":384,"pooling_mode_mean_tokens":true}',
+        "tokenizer_config.json": '{}', "tokenizer.json": '{}',
+        "model.safetensors": 'synthetic weight bytes', "README.md": 'Apache 2.0 fixture',
+    }
+    import hashlib
+    hashes = {}
+    for name, content in files.items():
+        path = model / name
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(content)
+        hashes[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+    provenance = {"schema_version": 1, "model_id": local_config.model_id,
+                  "model_revision": "a" * 40, "license": "apache-2.0",
+                  "model_path": str(model), "files": hashes,
+                  "weight_file": "model.safetensors"}
+    provenance["input_sha256"] = canonical_sha256({"model_id": local_config.model_id, "model_revision": "a" * 40})
+    provenance["output_sha256"] = canonical_sha256({k: v for k, v in provenance.items() if k != "model_path"})
+    return {
+        "config": replace(local_config, model_revision="a" * 40),
+        "metadata": {9: Movie(9, "Long film", ("Drama",)),
+                     2: Movie(2, "Toy Story (1995)", ("Comedy", "Animation"))},
+        "encoder_provenance": provenance,
+        "dataset_manifest": {"schema_version": 1, "dataset": "ml-1m", "archive_sha256": "d" * 64},
+    }
