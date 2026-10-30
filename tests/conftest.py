@@ -100,3 +100,19 @@ def study_config_path(tmp_path, study_settings):
     path = tmp_path / "study.json"
     path.write_text(json.dumps(study_settings, allow_nan=False), encoding="utf-8")
     return path
+
+
+@pytest.fixture
+def ninety_ratings():
+    """Ninety records; all three classes contribute to the split boundary."""
+    from signed_study.data import Rating
+
+    return tuple(Rating(1, 10 + 3 * i, (5, 1, 3)[i % 3], 1000 + i) for i in range(90))
+
+
+@pytest.fixture
+def local_config(tmp_path, monkeypatch, study_config_path):
+    from signed_study.protocol import load_config
+
+    monkeypatch.chdir(tmp_path)
+    return load_config(study_config_path)
