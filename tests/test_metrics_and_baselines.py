@@ -1,4 +1,4 @@
-"""Tiny, history-only baseline fixtures; no dataset/model acquisition."""
+"""Independent metrics and tiny history-only baselines; no acquisition."""
 
 from collections import Counter
 from dataclasses import replace
@@ -11,6 +11,7 @@ import numpy as np
 import pytest
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import roc_auc_score
 from sklearn.svm import SVC
 
 from signed_study.data import Episode, History
@@ -289,3 +290,204 @@ def test_geometric_adapter_oracles_and_chunking(support):
         assert models.score_user(model, (), vectors).shape == (0,)
     with pytest.raises(ValueError, match='positive'):
         models.fit_user('SignedMax', replace(history, positive_ids=()), vectors, {'K': 1, 'lambda': 1})
+
+
+def test_auc_ties_and_missing_result_envelope():
+    from signed_study.metrics import confidence_envelope, difference_bounds, evaluate_user
+
+    labels = np.array([1, 1, 0, 0])
+    for scores, expected in [([4, 3, 2, 1], 1), ([1, 2, 3, 4], 0),
+                             ([1, 1, 1, 1], .5), ([2, 1, 1, 0], .875)]:
+        result = evaluate_user(scores, labels, [4, 3, 2, 1])
+        positives, negatives = np.array(scores)[:2], np.array(scores)[2:]
+        direct = sum((p > n) + .5 * (p == n) for p in positives for n in negatives) / 4
+        assert result['auc'] == pytest.approx(expected)
+        assert result['auc'] == pytest.approx(direct)
+        assert result['auc'] == pytest.approx(roc_auc_score(labels, scores))
+    assert difference_bounds(None, None) == (-1., 1.)
+    assert difference_bounds(.75, None) == (-.25, .75)
+    assert difference_bounds(None, .25) == (-.25, .75)
+    assert difference_bounds(.75, .25) == (.5, .5)
+    result = confidence_envelope(np.full(4, .02), np.full(4, .02))
+    assert result['low'] == pytest.approx(.02)
+    assert result['high'] == pytest.approx(.02)
+
+
+def test_ranked_metrics_short_lists_ties_and_exact_stored_scores():
+    from signed_study.metrics import evaluate_user
+
+    # All ties: ascending ID puts one negative before two positives.
+    result = evaluate_user([1, 1, 1], [1, 0, 1], [30, 10, 20])
+    assert set(result) == {'auc', 'ndcg10', 'negative_at_10', 'tie_fraction'}
+    assert result['ndcg10'] == pytest.approx((1 / np.log2(3) + .5) / (1 + 1 / np.log2(3)))
+    assert result['negative_at_10'] == pytest.approx(1 / 3)
+    assert result['tie_fraction'] == 1
+    # One tied cross-class pair of four; same-class ties do not count.
+    assert evaluate_user([2, 1, 1, 0], [1, 1, 0, 0], [1, 2, 3, 4])['tie_fraction'] == .25
+    # Exact float64 equality, without a rounding tolerance.
+    almost = evaluate_user([np.nextafter(1., 2.), 1.], [1, 0], [2, 1])
+    assert almost['auc'] == 1 and almost['tie_fraction'] == 0
+    long = evaluate_user(range(12), [0] * 10 + [1, 1], range(12))
+    assert long['ndcg10'] == 1 and long['negative_at_10'] == .8
+    permutation = [2, 0, 1]
+    permuted = evaluate_user(np.ones(3)[permutation], np.array([1, 0, 1])[permutation],
+                            np.array([30, 10, 20])[permutation])
+    assert permuted == result
+
+
+@pytest.mark.parametrize('scores,labels,ids', [
+    ([], [], []), ([1, 2], [1, 1], [1, 2]), ([1, 2], [0, 0], [1, 2]),
+    ([1, 2], [1, 2], [1, 2]), ([1, np.nan], [0, 1], [1, 2]),
+    ([1, np.inf], [0, 1], [1, 2]), ([[1, 2]], [0, 1], [1, 2]),
+    ([1, 2], [0], [1, 2]), ([1, 2], [0, 1], [1, 1]),
+    ([1, 2], [0, 1], [1.5, 2]),
+])
+def test_metrics_reject_ineligible_or_misaligned_candidates(scores, labels, ids):
+    from signed_study.metrics import evaluate_user
+
+    with pytest.raises(ValueError):
+        evaluate_user(scores, labels, ids)
+
+
+def test_macro_metrics_weight_users_equally_and_precision_uses_paired_users():
+    from signed_study.metrics import macro_average, paired_standard_error, planned_half_width
+
+    users = [{'auc': 1., 'ndcg10': 1., 'negative_at_10': .1, 'tie_fraction': 0.},
+             {'auc': 0., 'ndcg10': .5, 'negative_at_10': .9, 'tie_fraction': 1.}]
+    assert macro_average(users) == {'auc': .5, 'ndcg10': .75, 'negative_at_10': .5, 'tie_fraction': .5}
+    # sd([-.2,0,.2], ddof=1)=.2; user count is 3, planned count is 100.
+    assert paired_standard_error([-.2, 0, .2]) == pytest.approx(.2 / np.sqrt(3))
+    assert planned_half_width([-.2, 0, .2], 100) == pytest.approx(.0392)
+    with pytest.raises(ValueError):
+        macro_average([])
+    with pytest.raises(ValueError):
+        paired_standard_error([.2])
+    with pytest.raises(ValueError):
+        planned_half_width([0, .1], 0)
+
+
+def test_confidence_envelope_uses_reproducible_paired_user_indices_in_bounded_batches(monkeypatch):
+    from signed_study.metrics import confidence_envelope
+
+    lower = np.array([-.8, -.2, .1, .4])
+    upper = lower + .3
+    # Independent small reference draws complete user rows, not ratings or pairs.
+    indices = np.random.default_rng(20261029).integers(0, 4, size=(437, 4))
+    expected_low = np.percentile([sum(lower[row]) / 4 for row in indices], 2.5)
+    expected_high = np.percentile([sum(upper[row]) / 4 for row in indices], 97.5)
+    real_rng = np.random.default_rng
+    batches = []
+
+    class BoundedGenerator:
+        def __init__(self, seed):
+            self.rng = real_rng(seed)
+
+        def integers(self, *args, **kwargs):
+            shape = kwargs['size']
+            batches.append(shape)
+            assert len(shape) == 2 and shape[0] <= 200 and shape[1] == 4
+            return self.rng.integers(*args, **kwargs)
+
+    monkeypatch.setattr(np.random, 'default_rng', BoundedGenerator)
+    first = confidence_envelope(lower, upper, resamples=437)
+    second = confidence_envelope(lower, upper, resamples=437, batch_size=7)
+    assert first['low'] == second['low'] == pytest.approx(expected_low)
+    assert first['high'] == second['high'] == pytest.approx(expected_high)
+    assert first['sample_mean_low'] == pytest.approx(-.125)
+    assert first['sample_mean_high'] == pytest.approx(.175)
+    assert batches and first['n_users'] == 4
+    # A second method uses the identical stream, preserving the shifted interval.
+    shifted = confidence_envelope(lower + .1, upper + .1, resamples=437, batch_size=31)
+    assert shifted['low'] == pytest.approx(first['low'] + .1)
+    assert shifted['high'] == pytest.approx(first['high'] + .1)
+
+
+def test_scheduled_cohort_missing_results_change_primary_decision():
+    from signed_study.metrics import interpret_interval, paired_analysis
+
+    complete = paired_analysis([10, 20, 30, 40], {u: .8 for u in [10, 20, 30, 40]},
+                               {u: .7 for u in [10, 20, 30, 40]})
+    assert complete['labels'] == ['practical_advantage']
+    partial = paired_analysis([10, 20, 30, 40], {10: .8}, {10: .7})
+    assert partial['n_users'] == 4 and partial['n_complete'] == 1 and partial['n_missing'] == 3
+    assert partial['sample_mean_low'] == pytest.approx(-.725)
+    assert partial['sample_mean_high'] == pytest.approx(.775)
+    assert partial['labels'] == ['inconclusive']
+    assert partial['complete_case']['label'] == 'complete_case_diagnostic'
+    assert partial['complete_case']['mean_difference'] == pytest.approx(.1)
+    assert partial['complete_case']['standard_error'] is None
+    assert partial['standard_error'] is None
+    absent = paired_analysis([10, 20], {}, {})
+    assert absent['low'] == -1 and absent['high'] == 1
+    assert absent['complete_case']['mean_difference'] is None
+    assert absent['complete_case']['standard_error'] is None
+    with pytest.raises(ValueError):
+        paired_analysis([10, 10], {}, {})
+    with pytest.raises(ValueError):
+        paired_analysis([10], {20: .8}, {})
+    assert interpret_interval(.01, .1) == ['inconclusive']
+
+
+def test_paired_analysis_matches_missing_sides_to_scheduled_user_order():
+    from signed_study.metrics import paired_analysis
+
+    result = paired_analysis([30, 10, 20, 40], {10: .75, 20: None}, {20: .25})
+    assert result['user_ids'] == [30, 10, 20, 40]
+    assert result['lower_bounds'] == [-1, -.25, -.25, -1]
+    assert result['upper_bounds'] == [1, .75, .75, 1]
+    assert result['sample_mean_low'] == -.625
+    assert result['sample_mean_high'] == .875
+    assert result['n_missing'] == 4 and result['n_complete'] == 0
+    complete = paired_analysis([10, 20], {20: .8, 10: .5}, {10: .6, 20: .5})
+    assert complete['complete_case']['mean_difference'] == pytest.approx(.1)
+    assert complete['standard_error'] == pytest.approx(.2)
+    assert complete['complete_case']['standard_error'] == pytest.approx(.2)
+
+
+@pytest.mark.parametrize('low,high,delta', [
+    (.2, .1, .01), (np.nan, .1, .01), (-.1, np.inf, .01),
+    (-1.1, 0, .01), (0, 1.1, .01), (0, .1, 0), (0, .1, -.01),
+])
+def test_interpretation_rejects_invalid_interval(low, high, delta):
+    from signed_study.metrics import interpret_interval
+
+    with pytest.raises(ValueError):
+        interpret_interval(low, high, delta)
+
+
+@pytest.mark.parametrize('low,high,expected', [
+    (.010001, .02, ['practical_advantage']),
+    (-.005, .009, ['against_practical_advantage', 'small_difference']),
+    (-.2, -.01, ['against_practical_advantage', 'harm']),
+    (-.01, .01, ['inconclusive', 'small_difference']),
+    (0, 0, ['against_practical_advantage', 'small_difference']),
+    (-.1, 0, ['against_practical_advantage']),
+    (-.1, .01, ['inconclusive']),
+])
+def test_interval_thresholds_are_strict_and_labels_are_additive(low, high, expected):
+    from signed_study.metrics import interpret_interval
+
+    assert interpret_interval(low, high) == expected
+
+
+@pytest.mark.parametrize('lower,upper,kwargs', [
+    ([], [], {}), ([0], [0, 1], {}), ([.5], [.4], {}),
+    ([np.nan], [1], {}), ([-1.1], [1], {}), ([0], [np.inf], {}),
+    ([0], [1], {'batch_size': 201}), ([0], [1], {'batch_size': 0}),
+    ([0], [1], {'resamples': 0}), ([0], [1], {'resamples': 1.5}),
+])
+def test_uncertainty_rejects_invalid_bounds_and_settings(lower, upper, kwargs):
+    from signed_study.metrics import confidence_envelope
+
+    with pytest.raises(ValueError):
+        confidence_envelope(lower, upper, **kwargs)
+
+
+@pytest.mark.parametrize('bad', [-.1, 1.1, np.nan, np.inf])
+def test_missing_bounds_reject_invalid_auc(bad):
+    from signed_study.metrics import difference_bounds
+
+    with pytest.raises(ValueError):
+        difference_bounds(bad, .5)
+    with pytest.raises(ValueError):
+        difference_bounds(.5, bad)
