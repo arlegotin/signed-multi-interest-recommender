@@ -1,21 +1,28 @@
 # Signed multi-interest recommendation study
 
 This package implements the CPU study in [the blueprint](docs/blueprint.md).
-All ordered stage commands and saved-evidence reports are implemented. Synthetic
-test results do not imply that a real experiment has occurred.
+The native study completed on all **418 development / 1776 confirmation users**.
+The result is an **informative negative**: SignedMax (K=2, lambda=2) achieved
+macro AUC **0.577081**, versus **0.604572** for frozen logistic regression (C=1).
+The paired difference was **−0.027491**, 95% user-bootstrap interval
+**[−0.032603, −0.022267]**, ruling out the predefined +0.01 advantage.
+All 13 frozen slots completed for every confirmation user; no results were
+missing. Independently tuned and matched negative-mean controls also did better.
+Negative feedback improved the positive-only readout, while the proposed
+nearest-negative aggregation did not provide the intended advantage.
 
-The original native run stopped at the **G2 declared pipeline forecast gate**. Acquisition,
-audit, current correctness and calibration measurements ran; no cohort was frozen
-and recommendation efficacy remains untested. Measured full-catalog encoding was
-11.19 seconds, 352 fits took 1.33 seconds, and canonical candidate scoring plus
-metrics took 0.50 seconds. A conservative pipeline-overhead forecast blocked all
-permitted schedules. This is historical stop evidence, not a scientific result.
-On 31 October the user authorized continuation to research results with elapsed
-time limits and the ordinary material repair quota made advisory. The scientific
-protocol, full primary cohort (418 development / 1776 confirmation), evaluation,
-memory, disk and single-worker constraints remain fixed. Read
-[the aggregate historical outcome](docs/study-outcome.md) and
-[the execution decisions](docs/study-decisions.md).
+Read [the complete aggregate outcome](docs/study-outcome.md),
+[all confirmation metric means](docs/native-confirmation-metrics.csv) and
+[the execution decisions](docs/study-decisions.md). Findings are conditional on
+this fixed encoder, metadata, feedback caps and later observed extreme ratings;
+they do not establish online utility or failure of nonlinear preferences generally.
+
+The original G2 forecast stop remains preserved as historical evidence. On
+31 October the user authorized results-first continuation: elapsed allocations,
+forecasts and ordinary material-repair quotas became advisory. The scientific
+question, thresholds, seeds, full cohorts and non-time constraints stayed fixed.
+Saved calibration's 1056 evaluations were adopted without repeated fitting or
+encoding. The completed campaign counted 62822 evaluations in total.
 
 Recreate the native Python 3.11/3.12 environment from the repository root, using
 the platform/Python in saved environment evidence and the exact package pins:
@@ -39,7 +46,9 @@ Preserve the original invocation config once its receipts are bound; do not
 copy resolved fields back into it. Stages recover the acquisition config, then
 `results/calibration_config.json` for measured policy choices.
 
-Execute in order, from the root with `.venv` active:
+Use the report recipe below for completed native evidence. The ordered stage
+recipe describes a fresh or unfinished approved run; experimental stages require
+their exact frozen scientific source. Execute from the root with `.venv` active:
 
 ```sh
 python -m signed_study inspect --config config/study-pinned.json
@@ -171,48 +180,49 @@ work; the CLI owns G6. Equal saved evidence yields equal scientific tables and
 figures. Repeated CLI admissions extend the ledger, so cost snapshots carry an
 as-of ledger identity and need not remain byte-identical.
 
-For reproducing the historical G2 early stop only, the generic CLI has known frozen-cohort,
-forecast-detail and dominant-cost wording limitations. The complete reproduction
-recipe requires the tracked saved-evidence packaging wrapper as a second step.
-Preserve original reports and tables in a versioned historical directory before
-rendering continuation results. The historical wrapper below describes the first
-stop and must not replace the active continuation report:
+Regenerate the active result from the existing local evidence, from the repository
+root with the exact pinned environment:
 
 ```sh
 .venv/bin/python -m signed_study report --results results
-.venv/bin/python scripts/render_study_outcome.py --results results
-.venv/bin/python scripts/render_study_outcome.py --results results
+.venv/bin/python scripts/render_results_first_study.py --results results
 ```
 
-Run from the repository root with the existing local evidence and exact pinned
-environment above. Preserve `results/resolved_config.json`, `budget_ledger.jsonl`,
-stage receipts, acquisition/audit/environment metadata, calibration publications
-and their bound dependencies at their recorded paths. Also preserve
-`results/operator_logs/task13-forecast-diagnostic.json`; its immutable SHA and
-calibration/workload references are checked by the wrapper. Existing
-`src/signed_study/report.py` verifies saved prerequisites without constructing a
-model. No stage, outcome-array loading, fitting, encoding or fresh inference is
-part of reporting. Do not recreate missing evidence by resuming unadmitted stages.
+The generic CLI writes the ten-section report, aggregate metrics/comparisons/
+counts/costs, paired interval and difference figures, and artifact inventory.
+The tracked saved-evidence packaging script verifies the bound native summary,
+adds operational qualifications, regenerates the committed aggregate CSVs and
+readable figure, and publishes a versioned reproduction receipt selected by
+`results/results-first-reproduction.json`. It needs no workflow scratch files. The native
+scientific exports were checked against the bound aggregate summary and then
+regenerated to verify identical scientific CSV/PNG hashes. Reporting extends the
+ledger, so cost snapshots carry their as-of identity and can change.
 
-Each wrapper invocation owns one G6 admission and calls the admission-free
-renderer API, without nested CLI accounting. It corrects the report's early-stop
-scope and distinguishes measured work from unexecuted forecasts, then writes:
+Preserve resolved configuration, ledger, effective stage receipts, acquisition,
+audit, environment, calibration publications, immutable lock/sidecar and exposure
+journal/marker at their bound paths. The native summary and operating-conditions
+receipts are in `results/operator_logs/task2-scientific-summary.json` and
+`task2-timing-operating-conditions.json`. The summary verifies exact complete
+coverage and separates measured model work, broader pipeline overhead and
+advisory forecasts. No model, encoding, new inference or outcome-array access
+is part of reporting.
 
-- `results/report.md`: all ten sections plus verified measurement/forecast detail.
-- `actual-calibration-costs.csv` and `.png`: measured phases and workload components.
-- `forecast-stage-costs.csv`, `forecast-scale-attempts.csv` and
-  `forecast-vs-allocation.png`: saved conservative forecasts, explicitly unexecuted.
-- `actual-work.csv`, `costs.csv`, `artifact-inventory.json` and
-  `outcome-reproduction.json`: counts, costs, generated hashes, script/recipe and
-  exact as-of ledger-prefix identities. These filenames are under `results/`.
+Timing used the fixed 3883-item catalog, 32 users, one warmup and five timed
+repeats. The configured policy was one worker/one BLAS thread; detected libomp
+had one thread. Accelerate's actual BLAS thread count was not independently
+verified. The pre-timing power/CPU snapshot includes background contention;
+performance claims stay within those observed conditions and catalog.
 
-The second wrapper invocation checks that scientific CSV/PNG hashes equal the
-previous regeneration. Full reports, inventories and cost snapshots can differ
-because G6 extends the ledger. The inventory identifies an exact byte prefix,
-not a claim that the active ledger remains unchanged after reporting finishes.
-Complete workflow narratives and their original-byte SHA index are archived
-locally in `results/operator_logs/workflow/`; regeneration uses no scratch
-workspace files. Local reproducibility artifacts and private data stay ignored.
+The historical G2-only `scripts/render_study_outcome.py` wrapper must not run
+against the active completed study. Read the preserved original narrative and
+exports under `results/history/2026-10-31-original-time-stop/`; its 20-file hash
+index remains unchanged. The active generic renderer conservatively flags an
+absolute/relative inspection-path mismatch. The tracked packaging script verifies
+the same file and exact hash against its completed G0 publication, resolves the
+qualification in the active report, and records it in the inventory; see the
+outcome for the specific qualification. The calibration actual-work row retains
+its original terminal forecast failure even though all 1056 measurements
+completed and were qualified by the new successful adoption receipt.
 
 Historical report validation checks the immutable freeze/publication references,
 journal hash chain/run identity and all current ledger statuses without requiring

@@ -4,10 +4,11 @@ This is the chronological controller decision history for the implementation
 and bounded native run. The line numbers refer to the original execution ledger,
 preserved with the complete workflow archive in ignored
 `results/operator_logs/workflow/`. They identify historical decisions, not steps
-to repeat. Earlier allocations and interim statuses were superseded. The final
-state is five transfers, G1=3300 seconds, G4=2100 seconds, two material repair
-cycles, and a G2 forecast stop. [The outcome](study-outcome.md) separates that
-operational stop from the unanswered efficacy question.
+to repeat. Earlier allocations and interim statuses were superseded. The original bounded
+run ended after five transfers (G1=3300 seconds, G4=2100 seconds), two material
+repair cycles and a G2 forecast stop. Those are historical facts. The user later
+authorized the results-first amendment recorded below; the full native study
+now has a valid informative negative [outcome](study-outcome.md).
 
 1. **Ledger 7 — use the existing main checkout.** The user required the current
    branch. Work therefore used ordinary reversible source commits on main; the
@@ -286,3 +287,79 @@ a separate tracked analysis wrapper, as authorized in the final integration
 instructions; experimental source and policy were not repaired again. Final
 reporting and archive costs extend the permanent ledger rather than resetting
 any historical snapshot.
+
+
+## 31 October results-first continuation
+
+The following controller rulings are retained verbatim and in chronological
+order from the continuation ledger. They supersede earlier time/quota and
+stop-status decisions where stated, while preserving their original history
+and the recorded costs if a ruling is wrong.
+
+> Ruling: Direct execution is authorized; no fresh design/plan approval or worktree menu — user explicitly requests rewriting this rule and continuing the existing approved study — any misinterpretation costs a reversible policy change, preserved in Git.
+
+> Ruling: Append a results_first ledger policy rather than change fixed config resource numbers or reset counters — immutable acquisition/resource identities and all historical costs must survive — missing a direct downstream time gate could block execution and needs regression coverage.
+
+> Ruling: Ordinary implementation repairs before freeze are allowed as needed, with logged counts and review; scientific solver/prototype iteration rules stay fixed — a time-driven process quota must not substitute for delivering results — unnoticed scientific changes would invalidate inference and must fail review.
+
+> Ruling: Use all 418 development / 1776 confirmation users by original digest order, and keep non-time limits — avoids time-driven loss of precision — actual memory/disk/evaluation issues require concrete diagnosis, never weakened inference.
+
+> Ruling: Perform the broad scientific implementation review together with Task 1 acceptance before real continuation and outcome exposure; final Task 2 review checks newly generated operational evidence and claims rather than duplicating unchanged source review — catches protocol defects while they are still fixable without contaminating confirmation — a missed source defect later must retain invalidation/exploratory qualification.
+
+> Ruling: Correct the newly discovered report-only old-cap check with focused RED/GREEN and refresh full G1 for the changed bound source; preserve the successful proof — new code and a concrete defect justify necessary repetition, while unchanged green source does not — deferring could mislabel honest results after an ordinary repair. No new user approval is needed. Worker remains sole ledger writer.
+
+> Ruling: Preserve old generated reports/exports byte-for-byte under a hash-indexed historical directory before replacing active generated filenames; keep original G0/G1/G2 machine publications at their bound paths — resolves an ambiguous “do not overwrite old report” phrase while delivering the new active scientific report — losing the indexed copies would lose historical narrative evidence. Design wording clarified; no executable inputs changed.
+
+> Ruling: Overlap only G6 historical evidence preservation with read-only source review — no experiment or outcome access, and source remains committed — preserves the earlier accepted stop before active generated report files change; inaccurate archival mapping would weaken auditability and is checked by original hashes.
+
+> Ruling: Permit a narrow hash-checked active-receipt selection for only calibration/smoke/development when a pre-freeze policy supersession requires a new full-cohort run — original stage and artifact bytes/paths survive while new receipts have a clear executable path — a reader ignoring the selector could consume stale evidence, so freeze/report/consumer coverage and the scoped re-review must check this interaction. No generic stage migration or post-freeze change is authorized.
+
+> Ruling: Summarize only existing saved 32-user development-calibration AUCs for the user’s early-insight request while the worker edits — no new fits/labels/confirmation and no selection/protocol change — treating this workload-coverage sample or untuned configurations as a winner would mislead, so scope is explicit. Worker explicitly handed over and then regained exclusive ledger ownership. Controller G6 artifact results/operator_logs/results-first-calibration-descriptive.json validates original bound publication and complete 32-user/11-config coverage, zero new evaluations. Descriptive means: SignedMax K4/lambda8 .6240093; MeanNegative same .6262220; LinearLogistic C.01 .6400421; RBF C.01/g.25 .6382203. User was told this is reason for caution, not a primary/confirmatory result. Native actual reservations remain1056 and confirmation closed.
+
+> Ruling: Archive and byte-verify only recorded completed pytest basetemps under .cache/results-first-* before deleting their working copies — preserve synthetic failure evidence while freeing capacity for actual outputs — incomplete archive would lose diagnostic fixtures, so every90206entry verified and currentG1/nativecalibration rechecked. G6 archive index results/operator_logs/synthetic-tests/results-first-focused-before-native.json SHA546b2d069fce8e52d3741c495f3f9f36abed9df50229006d49bf7a4735d6245d;17roots,991275803bytes removed,75919638-byte archive plus20MBindex retained; no native/model/data/cache change. Root releasedledger.
+
+> Ruling: Continue unchanged native G3 despite growing evidence-writing overhead — no scientific defect or hard-resource issue, user explicitly removes time limits, preserving current source/proof avoids unnecessary requalification/reruns — costs extra runtime/disk pressure, monitored and reported. Quartercheckpoint123/418users,9594/32604evals,0failures,369.4s elapsed; project4.377GB,RSS295MB,available6.91GB,free49.14GB, allhardgatespass.
+
+The amended policy was adopted as event
+`4f53bcb6-e098-4cd2-bb43-cfe6c056b50f`, preserving original resource identity,
+allocations, counters, failures and publications. Current source
+`5a0595d29869678c9b424ae0a9df42bfcee7f8f9` passed the accepted full 462-test
+G1 proof before real continuation. No bound source changed during native
+execution. Saved calibration adoption added zero model evaluations. All
+418 development users and 1776 confirmation users were retained by the
+original digest order; freeze and a separate current-context lock audit
+preceded first confirmation exposure.
+
+The native result is an informative negative: SignedMax AUC 0.577081 versus
+frozen logistic B* 0.604572, paired difference −0.027491 and 95% user-bootstrap
+interval [−0.032603, −0.022267], against unchanged delta 0.01. All 23088
+confirmation evaluations completed without failure or missing results.
+The complete 13-slot suite and 83-configuration development coverage were
+observed; complete-suite superiority was not established. Matched controls
+and mechanism intervals remain secondary/unadjusted and retain the negative
+mean scale-confounding qualification. All applicable numerical/timing
+diagnostics ran; contamination was inapplicable under its frozen scientific
+rule, not omitted for time. No post-exposure retuning, source correction,
+fresh holdout or additional science was introduced.
+
+One extra metadata audit failed after successful lock verification because
+its ignored helper supplied a list to dictionary-only hashing. The failed
+zero-evaluation admission `30ab46a5-fb11-4489-ad21-3de99972eb7d` (7.581s) and
+corrected successful audit `a0954945-fc5f-4e13-acbb-8834710adcd3` (7.705s) are
+retained. This changed no experimental code or frozen artifact. The final
+report distinguishes configured thread policy, detected libomp with one thread and
+unverified Accelerate thread count, with fresh point-in-time power/CPU
+conditions. Reporting-only relative/absolute inspection-path ambiguity is
+resolved independently against the exact original G0 publication; scientific
+source and inference were not repaired or relabeled.
+
+The tracked saved-evidence packaging recipe is
+`scripts/render_results_first_study.py`, run after the generic report CLI. It
+validates existing frozen publications and the bound native aggregate summary,
+reproduces public aggregate CSVs/figure, resolves the inspection path-spelling
+qualification and appends actual overhead/conditions to the active report.
+Versioned G6 receipts retain exact script/recipe/ledger-prefix and scientific
+export hashes; the current pointer is `results/results-first-reproduction.json`.
+The original G2-only wrapper remains historical. This analysis script was added
+after all scientific stages and introduces no model work, retuning, new
+bootstrap inference or experimental-source/test change.
