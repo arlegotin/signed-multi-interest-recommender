@@ -726,6 +726,26 @@ the completed stage artifact, preserving original publications. No re-encoding o
 refitting occurs in this adoption. Hard memory/disk/evaluation violations or
 unresolved scientific defects still block continuation and must remain explicit.
 
+Completed bounded receipts are not results-first evidence. Explicit
+`resume-calibration` requalification may reuse their fits only when the original
+G1, scientific implementation/settings, numerical validity and complete cache
+still qualify; it recomputes the full audited cohort and publishes a new policy-
+bound receipt without new evaluations. Readiness and freeze independently check
+every original digest-ordered primary/fallback ID, not forecast-claimed counts.
+Stale downstream evidence cannot reach confirmation. Only calibration, smoke and
+development support explicit pre-freeze supersession: preserve each original
+receipt and publication at its original path, write versioned replacement
+receipts with exact prior references, and resolve their hash-checked active
+references consistently in execution, freeze and reporting. Re-run smoke and
+development under those new input identities; never silently rewrite old work.
+
+An unsuccessful numerical calibration is not a dead end: after an allowed global
+repair or a genuine scientific implementation correction and fresh current G1,
+`calibrate` may perform new versioned measurements, retaining the prior terminal
+publication and cumulative attempted evaluations. Valid unchanged measurements
+remain on the zero-evaluation adoption/requalification route. A scientific code
+or numerical-policy change cannot be disguised as administrative fit reuse.
+
 ### 9.4 Timing and memory protocol
 
 Use time.perf_counter_ns around clear boundaries. Report cold preprocessing once, per-user fit, per-user score, and total evaluation including writes. Cache reuse is allowed across lambda values, but report both cached implementation cost and standalone formula operation counts.

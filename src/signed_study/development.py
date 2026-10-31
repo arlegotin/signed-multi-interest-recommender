@@ -7,7 +7,7 @@ import numpy as np
 from threadpoolctl import threadpool_limits
 
 from .budget import BudgetExceeded, atomic_write_json
-from .calibration import _fit_cost, _score_units, planned_comparison_schedule, select_calibration_users
+from .calibration import _fit_cost, _score_units, planned_comparison_schedule, select_calibration_users, require_full_cohort
 from .metrics import history_statistics, macro_average, planned_half_width, select_family, select_comparator
 from .models import endpoint_requests, initial_configurations, model_configuration
 from .protocol import canonical_sha256
@@ -231,6 +231,7 @@ def endpoint_campaign_forecast(cohort, entries, requests, timings, store, calibr
 
 def execute_development(config,ledger,store,cache,calibration,*,attempt_ids=None):
     """Execute admitted fixed cohorts; callers verify provenance and smoke first."""
+    require_full_cohort(config,store,calibration['forecast']['planned_user_ids'],ledger.snapshot())
     users=calibration['forecast']['planned_user_ids']['development']
     episodes={e.history.user_id:e for e in store.development}
     if not users or len(set(users))!=len(users) or not set(users)<=episodes.keys():

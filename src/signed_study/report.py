@@ -15,7 +15,7 @@ from statistics import fmean
 from . import confirmation, diagnostics, protocol_lock
 from .budget import Ledger, results_first
 from .protocol import ProtocolMismatch, canonical_sha256, config_from_record, load_config
-from .stage_evidence import file_reference, verify_record, verify_reference
+from .stage_evidence import file_reference, verify_record, verify_reference, stage_path
 
 
 def report_config(root):
@@ -344,9 +344,14 @@ def render_report(results_directory: Path) -> dict:
     environment_bound=bool(environment_ref and any(a.get('outputs',{}).get('environment')==environment_ref for a in attempts.values()))
     if environment and not environment_bound:
         problems.append('Inspection metadata is self-checksummed but lacks matching external ledger publication; hardware is unverified historical metadata')
-    artifacts={}
+    artifacts={};effective_stages={}
     for name in ('acquire','audit','calibrate','smoke','develop'):
-        path=root/'stages'/f'{name}.json'; row=read(path)
+        try:
+            path=stage_path(config,name) if config else root/'stages'/f'{name}.json'
+        except (ValueError,OSError,KeyError,TypeError) as error:
+            problems.append(f'{name}: invalid active receipt: {error}')
+            stage_rows.append(f'{name}: invalid active receipt');continue
+        row=read(path)
         if row is None:
             stage_rows.append(f'{name}: missing or invalid; not executed/verified')
             continue
@@ -356,9 +361,32 @@ def render_report(results_directory: Path) -> dict:
             # Preserve independently bound workload summaries even when an
             # unrelated raw/cache prerequisite is no longer installed.
             stage_records.append((name,row))
+            previous=row.get('supersedes'); seen={row['output_sha256']}
+            while previous:
+                verify_reference(previous)
+                historical=json.loads(Path(previous['path']).read_text());verify_record(historical)
+                if historical.get('stage')!=name or historical['output_sha256'] in seen:
+                    raise ProtocolMismatch('Invalid superseded pre-freeze receipt chain')
+                seen.add(historical['output_sha256'])
+                stage_records.append((name,historical))
+                note(previous['path'],'superseded pre-freeze receipt; retained actual work')
+                previous=historical.get('supersedes')
             for ref in row['artifacts'].values(): verify_reference(ref)
             bad=[attempts[a]['status'] for a in ids if attempts[a]['status']!='completed']
             status='incomplete current accounting' if bad else row['status']
+            if results_first(state):
+                policy=row.get('execution_policy',row.get('forecast',{}).get('execution_policy',{'mode':'bounded'}))
+                stale=name=='calibrate' and policy!=state['execution_policy']
+                calibration=effective_stages.get('calibrate')
+                if name in ('smoke','develop') and (not calibration or calibration.get('supersedes')):
+                    stale=(not calibration or row.get('inputs',{}).get('calibrate')!=calibration['output_sha256']
+                           or name=='develop' and (not effective_stages.get('smoke') or
+                               row.get('inputs',{}).get('smoke')!=effective_stages['smoke']['output_sha256']))
+                if stale:
+                    stage_rows.append(f'{name}: stale policy/inputs; explicit requalification or rerun required; historical evidence retained')
+                    note(path,'stale pre-freeze receipt; historical actual work retained')
+                    continue
+            effective_stages[name]=row
             stage_rows.append(f'{name}: {status}; stop reason: {row.get("stop_reason")}')
             artifacts.update(row['artifacts'])
         except (ValueError,OSError,KeyError,TypeError) as error:

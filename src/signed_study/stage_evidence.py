@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import uuid
 
 from .budget import atomic_write_json
 from .protocol import canonical_sha256
@@ -138,8 +139,26 @@ def verify_record(record):
         raise ValueError('Stage evidence digest/schema mismatch')
 
 
+_SUPERSEDABLE_STAGES=('calibrate','smoke','develop')
+
+
+def stage_path(config,stage):
+    """Resolve only the three mutable pre-freeze receipt roles, with hash checks."""
+    root=config.paths['results']/'stages'
+    selector=root/f'{stage}.active.json'
+    if stage in _SUPERSEDABLE_STAGES and selector.exists():
+        value=json.loads(selector.read_text()); verify_record(value)
+        reference=value['receipt']; path=Path(reference['path'])
+        if (value.get('stage')!=stage or path.parent.resolve()!=root.resolve()
+                or not path.name.startswith(stage+'-') or path.suffix!='.json'):
+            raise ValueError('Invalid pre-freeze active receipt reference')
+        verify_reference(reference)
+        return path
+    return root/f'{stage}.json'
+
+
 def read_stage(config,stage,inputs=None):
-    path=config.paths['results']/'stages'/f'{stage}.json'
+    path=stage_path(config,stage)
     record=json.loads(path.read_text())
     verify_record(record)
     if record['status']!='completed':
@@ -151,11 +170,28 @@ def read_stage(config,stage,inputs=None):
     return record
 
 
-def save_stage(config,stage,inputs,artifacts,attempt_ids,**extra):
+def save_stage(config,stage,inputs,artifacts,attempt_ids,*,supersedes=None,**extra):
     record=dict(schema_version=1,stage=stage,status='completed',stop_reason=None,
                 input_sha256=canonical_sha256(inputs),inputs=inputs,
                 artifacts={name:file_reference(path) for name,path in artifacts.items()},
                 attempt_ids=attempt_ids,**extra)
+    if supersedes is not None:
+        if stage not in _SUPERSEDABLE_STAGES:
+            raise ValueError('Only calibration/smoke/development receipts may be superseded')
+        root=config.paths['results']
+        if any((root/name).exists() for name in ('protocol.lock.json','protocol.lock.sha256',
+                'confirmation.exposure.json','confirmation.events.jsonl')):
+            raise ValueError('Receipt supersession is prohibited after freeze or exposure')
+        verify_reference(supersedes)
+        if supersedes!=file_reference(stage_path(config,stage)):
+            raise ValueError('Supersession must name the exact current receipt')
+        record['supersedes']=supersedes
     record['output_sha256']=canonical_sha256(record)
-    atomic_write_json(config.paths['results']/'stages'/f'{stage}.json',record)
+    root=config.paths['results']/'stages'
+    path=root/(f'{stage}-{uuid.uuid4().hex}.json' if supersedes else f'{stage}.json')
+    atomic_write_json(path,record)
+    if supersedes:
+        selector=dict(schema_version=1,stage=stage,receipt=file_reference(path))
+        selector['output_sha256']=canonical_sha256(selector)
+        atomic_write_json(root/f'{stage}.active.json',selector)
     return record

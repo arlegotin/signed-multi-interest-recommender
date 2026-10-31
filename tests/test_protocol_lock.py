@@ -160,6 +160,45 @@ def test_lock_rejects_missing_coverage_bad_controls_and_infeasible_work(frozen_s
             protocol_lock._validate_schedule(bad,config,store,ledger)
 
 
+def full_cohort_schedule(selected,store,config):
+    """Full audited IDs, independently ordered from the fixed digest formula."""
+    result=copy.deepcopy(selected)
+    digest=lambda uid:hashlib.sha256(f'signed-study:{uid}'.encode()).hexdigest()
+    for role in ('development','confirmation'):
+        result[f'{role}_user_ids']=sorted([e.history.user_id for e in getattr(store,role)],key=digest)
+    forecast=result['selected_forecast']
+    forecast['numerical_user_ids']=result['confirmation_user_ids'][:64]
+    forecast['evaluations']['G4']=len(result['confirmation_user_ids'])*13
+    forecast['evaluations']['G5']=len(forecast['timing_user_ids'])*13*6+len(forecast['numerical_user_ids'])*11
+    forecast['contamination']['user_ids']=result['confirmation_user_ids'][:200]
+    forecast['contamination']['evaluations']=len(forecast['contamination']['user_ids'])*12
+    return result
+
+
+@pytest.mark.parametrize('dataset,counts',[('ml-1m',(418,1776)),('ml-100k',(62,225))])
+@pytest.mark.parametrize('role',['development','confirmation'])
+@pytest.mark.parametrize('fault',['reduced','reordered'])
+def test_results_first_freeze_requires_exact_full_audited_cohort(frozen_study,dataset,counts,role,fault):
+    from dataclasses import replace
+    from types import SimpleNamespace
+    from signed_study import protocol_lock, protocol
+    from signed_study.calibration import select_calibration_users
+    from test_calibration import cohort
+    config,ledger,_,lock=frozen_study
+    store=cohort(*counts,dataset)
+    config=replace(config,dataset=dataset)
+    selected=full_cohort_schedule(protocol_lock.read_lock(lock)[1]['development'],store,config)
+    selected['selected_forecast']['timing_user_ids']=select_calibration_users(list(store.development))
+    state=ledger.snapshot();state['execution_policy']={'mode':'results_first'}
+    fake=SimpleNamespace(snapshot=lambda:state)
+    protocol_lock._validate_schedule(selected,config,store,fake)
+    bad=copy.deepcopy(selected)
+    if fault=='reduced': bad[f'{role}_user_ids'].pop()
+    else: bad[f'{role}_user_ids'].reverse()
+    with pytest.raises(protocol.ProtocolMismatch,match='full.*cohort|cohort.*full'):
+        protocol_lock._validate_schedule(bad,config,store,fake)
+
+
 def test_live_artifact_mutations_fail_before_outcome_arrays(frozen_study,monkeypatch):
     from signed_study import run, data, protocol
     config,ledger,store,lock=frozen_study

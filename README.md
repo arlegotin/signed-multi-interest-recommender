@@ -110,6 +110,24 @@ attempt and the archived old correctness bytes. Downstream stages resolve the
 calibration artifact from that completed stage. For a new study without saved
 measurements, use `calibrate` in place of `resume-calibration`.
 
+If an earlier bounded run completed calibration with a smaller cohort, ordinary
+reuse becomes stale after results-first adoption. `resume-calibration` explicitly
+requalifies unchanged scientific measurements and publishes the full audited
+cohort without fitting again. It preserves the old calibration and policy files
+and the old receipt at its original path. Re-run `smoke` and `develop` in order:
+only this explicit supersession permits replacement evidence, saved to new
+versioned receipt files. Hash-checked `stages/{calibrate,smoke,develop}.active.json`
+references select the effective receipts; original receipts and outputs remain
+readable. Freeze and reporting use those verified effective references. No
+receipt can be superseded after freeze or confirmation exposure.
+
+When calibration instead requires a permitted numerical repair or a scientific
+implementation correction, record the repair, obtain fresh G1 and invoke
+`calibrate` with the repaired configuration. A qualified correction performs
+new, counted measurements in a versioned calibration publication; it preserves
+the prior publication, probe, policy and failed attempt. Administrative policy
+requalification never substitutes for required scientific remeasurement.
+
 Stages return status, hashed artifacts, attempt IDs and stop reasons. Unmet
 prerequisites exit nonzero. Matching completed work is verified and reused;
 missing/corrupt cache or receipts fail closed. Calibration records forecasts,

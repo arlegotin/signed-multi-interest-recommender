@@ -250,6 +250,50 @@ def test_recorded_global_policy_reuses_acquisition_and_applies_to_every_fit(pipe
     assert result['status']=='completed',result
 
 
+@pytest.mark.parametrize('repair_kind',['prototype','implementation'])
+def test_failed_calibration_can_be_remeasured_after_qualified_repair(pipeline,monkeypatch,repair_kind):
+    from signed_study.stage_evidence import file_reference
+    config,ledger,_,_,events,stages,evidence,_=pipeline
+    prepare(pipeline)
+    original=stages.measure_users
+    phase={'repaired':False}
+    def measured(*args,**kwargs):
+        result=original(*args,**kwargs)
+        if not phase['repaired']:
+            result.update(status='repair_required',repair_decisions=[dict(kind='prototype_trace_inspection',status='required')])
+        return result
+    monkeypatch.setattr(stages,'measure_users',measured)
+    failed=stages.run_stage('calibrate',config,ledger)
+    assert failed['status']=='repair_required'
+    previous=file_reference(config.paths['results']/'calibration.json')
+    probe=file_reference(config.paths['results']/'calibration_probe.json')
+    parent=failed['attempt_ids'][-1]
+    assert ledger.snapshot()['attempts'][parent]['status']=='blocked'
+    assert stages.run_stage('calibrate',config,ledger)['status']=='blocked'  # no repair yet
+    assert ledger.snapshot()['attempted_evaluations']==1056
+    if repair_kind=='prototype':
+        config=replace(config,prototype={**config.prototype,'max_updates':100},
+            pre_freeze_repairs=({'kind':'prototype_iterations','stage':'G2','reason':'published cap trace evidence'},))
+    else:
+        identity=evidence.code_identity
+        monkeypatch.setattr(evidence,'code_identity',lambda:{**identity(),'src/signed_study/models.py':'f'*64})
+    assert evidence.record_correctness(config,ledger)['status']=='completed'
+    phase['repaired']=True
+    result=stages.run_stage('calibrate',config,ledger)
+    assert result['status']=='completed',result
+    assert result['artifacts']['calibration']['path']!=previous['path']
+    assert file_reference(previous['path'])==previous
+    assert file_reference(probe['path'])==probe
+    measured=json.loads(Path(result['artifacts']['calibration']['path']).read_text())
+    assert measured['remeasurement_provenance']['previous_publication']==previous
+    assert measured['remeasurement_provenance']['parent_attempt_id']==parent
+    state=ledger.snapshot()
+    assert state['attempted_evaluations']==2112
+    assert state['attempts'][parent]['status']=='blocked'
+    assert all(state['attempts'][a]['status']=='completed' for a in result['attempt_ids'])
+    assert not set(failed['attempt_ids'])&set(result['attempt_ids'])
+
+
 def test_failed_correctness_never_opens_g2(pipeline,monkeypatch):
     config,ledger,_,_,events,stages,evidence,_=pipeline
     prepare(pipeline)

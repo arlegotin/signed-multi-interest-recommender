@@ -11,7 +11,7 @@ from signed_study.stage_evidence import file_reference
 from test_budget_transfers import transfer_case
 from test_calibration import cohort, measured
 from test_stage_pipeline import pipeline, prepare
-from test_protocol_lock import frozen_study
+from test_protocol_lock import frozen_study, full_cohort_schedule
 
 
 def adopt(ledger):
@@ -303,6 +303,128 @@ def test_original_failed_calibration_cannot_be_overwritten_by_calibrate(pipeline
     assert len(events)==count
 
 
+def test_policy_transition_requalifies_reduced_receipt_without_losing_its_identity(pipeline,monkeypatch):
+    from signed_study.stage_evidence import read_stage, save_stage
+    config,ledger,_,_,_,stages,_,_=pipeline
+    prepare(pipeline)
+    original_forecast=stages.forecast_scale
+    def reduced(*args):
+        result=original_forecast(*args)
+        result['scale']=[256,1500]
+        result['planned_user_ids']={role:ids[:n] for (role,ids),n in
+                                   zip(result['planned_user_ids'].items(),(256,1500))}
+        return result
+    with monkeypatch.context() as bounded:
+        bounded.setattr(stages,'forecast_scale',reduced)
+        old=stages.run_stage('calibrate',config,ledger)
+    assert old['status']=='completed'
+    old_receipt=file_reference(config.paths['results']/'stages'/'calibrate.json')
+    old_calibration=old['artifacts']['calibration']
+    old_policy=old['artifacts']['policy']
+    with ledger.work('G3',0,0) as aid:
+        smoke=save_stage(config,'smoke',{'calibrate':old['output_sha256'],'development_users':8},{},[aid])
+    with ledger.work('G3',0,0) as aid:
+        save_stage(config,'develop',{'calibrate':old['output_sha256'],'smoke':smoke['output_sha256']},{},[aid])
+    stale={name:file_reference(config.paths['results']/'stages'/f'{name}.json') for name in ('smoke','develop')}
+    event_id=adopt(ledger)
+    monkeypatch.setattr(stages,'measure_users',lambda *a,**kw:pytest.fail('policy requalification must not refit'))
+    monkeypatch.setattr(stages,'load_encoder',lambda *a:pytest.fail('policy requalification must not encode'))
+    for action in ('calibrate','smoke','develop'):
+        result=stages.run_stage(action,config,ledger)
+        assert result['status']=='blocked',(action,result)
+    result=stages.run_stage('resume-calibration',config,ledger)
+    assert result['status']=='completed',result
+    assert result['forecast']['scale']==[418,1776]
+    assert result['execution_policy']['event_id']==event_id
+    assert result['output_sha256']!=old['output_sha256']
+    assert read_stage(config,'calibrate')==result
+    assert file_reference(old_receipt['path'])==old_receipt
+    assert file_reference(old_calibration['path'])==old_calibration
+    assert file_reference(old_policy['path'])==old_policy
+    assert result['artifacts']['previous_receipt']==old_receipt
+    assert ledger.snapshot()['attempted_evaluations']==1056
+    for name,reference in stale.items():
+        assert file_reference(reference['path'])==reference
+    from signed_study import report
+    interim=report.render_report(config.paths['results'])
+    interim_text=Path(interim['report']).read_text()
+    assert 'smoke: stale' in interim_text and 'develop: stale' in interim_text
+    with pytest.raises(ValueError,match='inputs changed'):
+        read_stage(config,'smoke',{'calibrate':result['output_sha256'],'development_users':8})
+    def smoke_workload(store,cache,users,resolved,ledger,*,output_path,**kwargs):
+        value=dict(status='completed',actual_evaluations=624,attempts=[])
+        atomic_write_json(output_path,dict(schema_version=1,input_sha256=canonical_sha256({'users':users}),
+            output_sha256=canonical_sha256(value),measurements=value))
+        return value
+    monkeypatch.setattr(stages,'measure_users',smoke_workload)
+    new_smoke=stages.run_stage('smoke',config,ledger)
+    assert new_smoke['status']=='completed',new_smoke
+    assert new_smoke['supersedes']==stale['smoke']
+    from signed_study import development, report
+    def develop(resolved,ledger,store,cache,measurements,**kwargs):
+        value=dict(schema_version=1,status='completed',attempts=[],actual_evaluations=0)
+        value['output_sha256']=canonical_sha256(value)
+        atomic_write_json(config.paths['results']/'new-development.json',value)
+        return dict(status='completed',artifact_name='new-development.json',batches=[],complete_suite_eligible=True)
+    monkeypatch.setattr(development,'execute_development',develop)
+    new_develop=stages.run_stage('develop',config,ledger)
+    assert new_develop['status']=='completed',new_develop
+    assert new_develop['supersedes']==stale['develop']
+    assert read_stage(config,'smoke')==new_smoke
+    assert read_stage(config,'develop')==new_develop
+    for reference in stale.values(): assert file_reference(reference['path'])==reference
+    rendered=report.render_report(config.paths['results'])
+    assert rendered['outcome']!='practical infeasibility'
+    inventory=json.loads(Path(rendered['inventory']).read_text())['artifacts']
+    effective=json.loads((config.paths['results']/'stages'/'calibrate.active.json').read_text())['receipt']
+    assert any(Path(row['name']).name==Path(effective['path']).name for row in inventory)
+    assert any(row['status'].startswith('superseded') and Path(row['name']).name=='calibrate.json' for row in inventory)
+    import csv
+    actual={row['work']:row for row in csv.DictReader((config.paths['results']/'actual-work.csv').open())}
+    assert actual['calibration']['reserved']=='1056'
+    assert actual['smoke']['reserved']=='624'
+    assert not (config.paths['results']/'protocol.lock.json').exists()
+    assert not (config.paths['results']/'confirmation.exposure.json').exists()
+    (config.paths['results']/'protocol.lock.json').write_text('synthetic frozen marker')
+    with pytest.raises(ValueError,match='freeze|exposure'):
+        save_stage(config,'calibrate',result['inputs'],{},[],supersedes=effective)
+    selector=config.paths['results']/'stages'/'calibrate.active.json'
+    selector.write_text('{}')
+    with pytest.raises(ValueError): read_stage(config,'calibrate')
+
+
+def test_results_first_development_rejects_reduced_cohort_before_work(pipeline,monkeypatch):
+    from signed_study import development
+    config,ledger,_,_,_,_,_,store=pipeline
+    adopt(ledger)
+    calibration={'forecast':{'planned_user_ids':{
+        'development':[e.history.user_id for e in store.development[:256]],
+        'confirmation':[e.history.user_id for e in store.confirmation[:1500]]}}}
+    monkeypatch.setattr(development,'measure_users',lambda *a,**kw:pytest.fail('reduced evidence reached model/outcome work'))
+    with pytest.raises(ValueError,match='full.*cohort'):
+        development.execute_development(config,ledger,store,None,calibration)
+    assert ledger.snapshot()['attempted_evaluations']==0
+
+
+def test_adopted_calibration_requalification_retains_original_workload_owner(pipeline,monkeypatch):
+    from signed_study.stage_evidence import read_stage
+    config,ledger,_,_,_,stages,evidence,_=pipeline
+    failed,_=saved_calibration(pipeline,monkeypatch)
+    first=stages.run_stage('resume-calibration',config,ledger)
+    assert first['status']=='completed',first
+    previous=file_reference(config.paths['results']/'stages'/'calibrate.json')
+    assert evidence.record_correctness(config,ledger)['status']=='completed'
+    monkeypatch.setattr(stages,'measure_users',lambda *a,**kw:pytest.fail('administrative G1 refresh must not refit'))
+    monkeypatch.setattr(stages,'load_encoder',lambda *a:pytest.fail('administrative G1 refresh must not encode'))
+    current=stages.run_stage('resume-calibration',config,ledger)
+    assert current['status']=='completed',current
+    assert current['reused_measurement_provenance']['parent_attempt_id']==failed['attempt_ids'][-1]
+    assert current['supersedes']==previous
+    assert read_stage(config,'calibrate')==current
+    assert file_reference(previous['path'])==previous
+    assert ledger.snapshot()['attempted_evaluations']==1056
+
+
 def test_repeated_policy_adoption_after_freeze_is_rejected(transfer_case, local_config):
     ledger, _, _ = transfer_case
     adopt(ledger)
@@ -342,16 +464,17 @@ def test_freeze_schedule_rechecks_non_time_constraints_with_advisory_clocks(froz
     _, ledger, store, lock = frozen_study
     _, payload = protocol_lock.read_lock(lock)
     config = config_from_record(payload['config'])
+    selected=full_cohort_schedule(payload['development'],store,config)
     state = ledger.snapshot()
     state.update(experimental_seconds=1e9, stage_seconds={s:1e9 for s in state['stage_seconds']},
                  execution_policy={'mode':'results_first'})
     fake = SimpleNamespace(snapshot=lambda:state)
-    protocol_lock._validate_schedule(payload['development'],config,store,fake)
+    protocol_lock._validate_schedule(selected,config,store,fake)
     state['execution_policy'] = {'mode':'bounded'}
-    with pytest.raises(ProtocolMismatch): protocol_lock._validate_schedule(payload['development'],config,store,fake)
+    with pytest.raises(ProtocolMismatch): protocol_lock._validate_schedule(selected,config,store,fake)
     state['execution_policy'] = {'mode':'results_first'}
     state['attempted_evaluations'] = 99999
-    with pytest.raises(ProtocolMismatch): protocol_lock._validate_schedule(payload['development'],config,store,fake)
+    with pytest.raises(ProtocolMismatch): protocol_lock._validate_schedule(selected,config,store,fake)
 
 
 def test_report_qualifies_third_long_repair_without_waiving_cost_integrity(transfer_case):

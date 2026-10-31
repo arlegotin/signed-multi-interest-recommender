@@ -7,7 +7,7 @@ from pathlib import Path
 import subprocess
 
 from . import data, stage_evidence as evidence
-from .calibration import planned_comparison_schedule, select_calibration_users
+from .calibration import planned_comparison_schedule, select_calibration_users, require_full_cohort
 from .embed import load_embedding_cache
 from .protocol import ProtocolMismatch, VerifiedProtocol, canonical_sha256, load_config
 
@@ -65,18 +65,21 @@ def _context(config,ledger):
         raise ProtocolMismatch('Calibration acquisition/audit changed')
     smoke=_prerequisite(config,'smoke',ledger,{'calibrate':calibration['output_sha256'],'development_users':8})
     stage=_prerequisite(config,'develop',ledger,{'calibrate':calibration['output_sha256'],'smoke':smoke['output_sha256']})
-    resolved=load_config(config.paths['results']/'calibration_config.json')
+    resolved=load_config(Path(calibration['artifacts']['policy']['path']))
     store=data.load_episode_store(audit['artifacts']['audit']['path'],audit['artifacts']['episodes']['path'])
     cache=load_embedding_cache(resolved.paths['cache']/'embeddings',expected)
     development=json.loads(Path(stage['artifacts']['development']['path']).read_text())
     evidence.verify_record(development)
     measurements=calibration_measurements(config,calibration)
+    _full_cohort(resolved,store,calibration['forecast']['planned_user_ids'],ledger.snapshot())
+    _full_cohort(resolved,store,{role:development[f'{role}_user_ids'] for role in ('development','confirmation')},ledger.snapshot())
     if development['input_sha256']!=canonical_sha256(dict(config=evidence.config_record(resolved),calibration=measurements['output_sha256'])):
         raise ProtocolMismatch('Development resolved policy/calibration changed')
     refs={name:evidence.file_reference(config.paths['results']/name) for name in
-          ('environment.json','resolved_config.json','calibration_config.json')}
+          ('environment.json','resolved_config.json')}
+    refs['calibration_config.json']=calibration['artifacts']['policy']
     refs['calibration.json']=calibration['artifacts']['calibration']
-    refs.update({f'stage_{name}':evidence.file_reference(config.paths['results']/'stages'/f'{name}.json')
+    refs.update({f'stage_{name}':evidence.file_reference(evidence.stage_path(config,name))
                  for name in ('acquire','audit','calibrate','smoke','develop')})
     # Verify all selected outcome bytes before allowing even the first array load.
     outcome_refs={str(uid):evidence.file_reference(store.paths['confirmation_outcomes']/f'{uid}.npy')
@@ -119,7 +122,15 @@ def live_inputs(config,ledger):
         raise ProtocolMismatch(str(error)) from error
 
 
+def _full_cohort(config,store,planned,state):
+    try:
+        require_full_cohort(config,store,planned,state)
+    except ValueError as error:
+        raise ProtocolMismatch(str(error)) from error
+
+
 def _validate_schedule(development,config,store,ledger):
+    _full_cohort(config,store,{role:development[f'{role}_user_ids'] for role in ('development','confirmation')},ledger.snapshot())
     schedule=development['comparison_schedule']
     expected=planned_comparison_schedule()
     if (development['status']!='completed' or development['missing_required_families'] or

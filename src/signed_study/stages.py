@@ -9,7 +9,7 @@ import uuid
 from threadpoolctl import threadpool_limits, threadpool_info
 
 from .budget import BudgetExceeded, LedgerBusy, atomic_write_json, results_first
-from .calibration import forecast_scale, select_calibration_users
+from .calibration import forecast_scale, select_calibration_users, require_full_cohort
 from .data import (SOURCES, Movie, episode_store_digest, _acquire_archive as acquire_archive, load_dataset,
                    make_episodes, load_episode_store)
 from .embed import (resolve_encoder, expected_embedding_manifest, load_encoder,
@@ -17,7 +17,7 @@ from .embed import (resolve_encoder, expected_embedding_manifest, load_encoder,
 from .protocol import load_config, canonical_sha256
 from .stage_evidence import (config_record, file_reference, read_stage, save_stage,
                              verify_record, verify_correctness, environment_pins,
-                             write_environment_lock, verify_environment_lock, verify_reference)
+                             write_environment_lock, verify_environment_lock, verify_reference, stage_path)
 from .workload import measure_users, calibration_entries
 
 
@@ -49,10 +49,101 @@ def _read(config,name):
 
 def _prerequisite(config,name,ledger,inputs=None):
     record=read_stage(config,name,inputs)
-    attempts=ledger.snapshot()['attempts']
+    state=ledger.snapshot(); attempts=state['attempts']
     if not record['attempt_ids'] or any(attempts[a]['status']!='completed' for a in record['attempt_ids']):
         raise StageBlocked(f'{name} has no completed ledger evidence')
+    if name=='calibrate' and results_first(state) and _receipt_policy(record)!=state['execution_policy']:
+        raise StageBlocked('Calibration execution policy is stale; use resume-calibration to requalify before downstream work')
     return record
+
+
+def _receipt_policy(record):
+    return record.get('execution_policy',record.get('forecast',{}).get('execution_policy',{'mode':'bounded'}))
+
+
+def _pre_freeze(config,ledger):
+    if any((config.paths['results']/name).exists() for name in ('protocol.lock.json','protocol.lock.sha256',
+            'confirmation.exposure.json','confirmation.events.jsonl')) or any(
+            a['stage'] in ('G4','G5') or a.get('outputs',{}).get('protocol_lock')
+            for a in ledger.snapshot()['attempts'].values()):
+        raise StageBlocked('New calibration or receipt supersession is prohibited after freeze or exposure')
+
+
+def _original_correctness(config,ledger,inputs,measured):
+    """Find the ledger-qualified G1 bound into the original measured publication."""
+    state=ledger.snapshot()
+    for path in config.paths['results'].glob('correctness*.json'):
+        proof=json.loads(path.read_text()); verify_record(proof)
+        if measured['input_sha256']!=canonical_sha256({**inputs,'correctness':proof['output_sha256']}):
+            continue
+        if (proof.get('status')!='completed' or proof.get('returncode')!=0
+                or not proof.get('command_attempt_ids')
+                or proof['input_sha256']!=canonical_sha256(proof['inputs'])
+                or any(state['attempts'][a]['stage']!='G1' or state['attempts'][a]['status']!='completed'
+                       for a in proof['attempt_ids'])
+                or any(state['attempts'][a].get('outputs',{}).get('returncode')!=0
+                       or state['attempts'][a]['outputs'].get('command')!=proof['command']
+                       for a in proof['command_attempt_ids'])):
+            raise StageBlocked('Original calibration G1 proof is unsuccessful or unbound')
+        return path,proof
+    raise StageBlocked('Original calibration G1 evidence is missing')
+
+
+_SCIENTIFIC_FILES=('data.py','embed.py','models.py','metrics.py','protocol.py','workload.py')
+
+
+def _scientific_changed(proof,current):
+    return any(not proof['inputs']['code'].get('src/signed_study/'+name)
+               or proof['inputs']['code']['src/signed_study/'+name]!=current['code'].get('src/signed_study/'+name)
+               for name in _SCIENTIFIC_FILES)
+
+
+def _qualify_reuse(config,ledger,inputs,resolved,measured):
+    from .stage_evidence import correctness_inputs
+    proof_path,proof=_original_correctness(config,ledger,inputs,measured)
+    current=correctness_inputs(config)
+    if any(proof['inputs'].get(key)!=current[key] for key in ('config','environment','environment_lock')):
+        raise StageBlocked('Original scientific settings or environment changed')
+    if _scientific_changed(proof,current):
+        raise StageBlocked('Measured scientific implementation changed; remeasurement is required')
+    if measured.get('policy')!=config_record(resolved):
+        raise StageBlocked('Saved calibration scientific policy changed')
+    return proof_path,proof
+
+
+def _remeasurement(config,ledger,inputs,resolved,previous):
+    """Require a real scientific correction, not a fresh administrative receipt."""
+    from .stage_evidence import correctness_inputs
+    verify_reference(previous)
+    measured=json.loads(Path(previous['path']).read_text()); verify_record(measured)
+    parents=[a for a in ledger.snapshot()['attempts'].values() if a['stage']=='G2'
+             and a.get('outputs',{}).get('calibration')==previous and a['status']!='unfinished']
+    if not parents and stage_path(config,'calibrate').exists():
+        old=read_stage(config,'calibrate')
+        state=ledger.snapshot()
+        if old['artifacts']['calibration']==previous and all(state['attempts'][a]['status']=='completed' for a in old['attempt_ids']):
+            parents=[state['attempts'][a] for a in old['attempt_ids'] if state['attempts'][a]['stage']=='G2'
+                     and state['attempts'][a]['evaluations']>0]
+    if not parents:
+        raise StageBlocked('Prior calibration publication lacks terminal ledger provenance')
+    proof_path,proof=_original_correctness(config,ledger,inputs,measured)
+    current=correctness_inputs(config)
+    groups=('prototype','linear_logistic','rbf_svm','encoder','numerics','timing')
+    policy=config_record(resolved)
+    numerical_change=any(measured['policy'][key]!=policy[key] for key in groups)
+    scientific_change=_scientific_changed(proof,current)
+    if (proof['output_sha256']==inputs['correctness'] or not (scientific_change or
+            measured.get('status')!='completed' and numerical_change)):
+        raise StageBlocked('Saved calibration requires a qualified scientific repair and fresh G1; valid measurements use resume-calibration')
+    _pre_freeze(config,ledger)
+    return dict(previous_publication=previous,parent_attempt_id=parents[-1]['attempt_id'],
+                original_correctness=file_reference(proof_path),original_input_sha256=measured['input_sha256'],
+                scientific_implementation_changed=scientific_change,numerical_policy_changed=numerical_change)
+
+
+def _publication_path(config,name,token):
+    path=config.paths['results']/f'{name}.json'
+    return path if not path.exists() else path.with_name(f'{name}-{token}.json')
 
 
 def _acquisition_inputs(config):
@@ -175,17 +266,28 @@ def _calibration_context(config,ledger):
 
 
 def _calibrate(config,ledger,attempts):
+    supersedes=None; remeasurement=None
     with ledger.work('G0',0,0) as check:
         attempts.append(check)
         inputs,resolved,manifest,provenance,metadata,expected,store=_calibration_context(config,ledger)
         cache_path=resolved.paths['cache']/'embeddings'
-        if (config.paths['results']/'stages'/'calibrate.json').exists():
-            result=_prerequisite(config,'calibrate',ledger,inputs)
-            load_embedding_cache(cache_path,expected)
-            return result
-        if (config.paths['results']/'calibration.json').exists():
-            raise StageBlocked('Saved calibration publication exists; use resume-calibration and preserve its history')
+        if stage_path(config,'calibrate').exists():
+            previous=read_stage(config,'calibrate')
+            if previous['input_sha256']==canonical_sha256(inputs):
+                result=_prerequisite(config,'calibrate',ledger,inputs)
+                require_full_cohort(resolved,store,result['forecast']['planned_user_ids'],ledger.snapshot())
+                load_embedding_cache(cache_path,expected)
+                return result
+            supersedes=file_reference(stage_path(config,'calibrate'))
+            remeasurement=_remeasurement(config,ledger,inputs,resolved,previous['artifacts']['calibration'])
+        elif (config.paths['results']/'calibration.json').exists():
+            publications=[a['outputs']['calibration'] for a in ledger.snapshot()['attempts'].values()
+                          if a['stage']=='G2' and a.get('outputs',{}).get('calibration')]
+            previous=publications[-1] if publications else file_reference(config.paths['results']/'calibration.json')
+            remeasurement=_remeasurement(config,ledger,inputs,resolved,previous)
+        _pre_freeze(config,ledger)
     measurements={'schema_version':1,'input_sha256':canonical_sha256(inputs), 'timings':{},'catalog_items':len(metadata)}
+    if remeasurement: measurements['remeasurement_provenance']=remeasurement
     def timed(name,call):
         start=time.perf_counter_ns()
         result=call()
@@ -208,7 +310,7 @@ def _calibrate(config,ledger,attempts):
         measurements['repeatability']=check_repeatability(probe.raw_rows(repeat_ids),repeat.raw_rows(repeat_ids))
         measurements['probe_resources']=ledger.checkpoint()
         probe_record={**measurements,'output_sha256':canonical_sha256(measurements)}
-        atomic_write_json(config.paths['results']/'calibration_probe.json',probe_record)
+        atomic_write_json(_publication_path(config,'calibration_probe',aid),probe_record)
         if not measurements['repeatability']['accepted']:
             raise StageBlocked('Raw encoder repeatability failed; investigate before full-cache admission')
     projected=measurements['timings']['probe_seconds']*len(metadata)/128
@@ -235,10 +337,11 @@ def _calibrate(config,ledger,attempts):
         measurements['forecast']=forecast_scale(measurements,store,ledger) if measured['status']=='completed' else None
         measurements['resources']=ledger.checkpoint()
         measurements['output_sha256']=canonical_sha256(measurements)
-        atomic_write_json(config.paths['results']/'calibration.json',measurements)
+        calibration_path=_publication_path(config,'calibration',aid)
+        atomic_write_json(calibration_path,measurements)
         if measured['status']!='completed':
-            ledger.finish(aid,'blocked',{}, {'calibration':file_reference(config.paths['results']/'calibration.json')})
-            return dict(status='repair_required',artifacts={'calibration':file_reference(config.paths['results']/'calibration.json'),
+            ledger.finish(aid,'blocked',{}, {'calibration':file_reference(calibration_path),'attempts':file_reference(workload_path)})
+            return dict(status='repair_required',artifacts={'calibration':file_reference(calibration_path),
                         'attempts':file_reference(workload_path)},attempt_ids=attempts,
                         stop_reason='Unresolved calibration validity/convergence evidence',repair_decisions=measured['repair_decisions'])
         forecast=measurements['forecast']
@@ -246,19 +349,25 @@ def _calibrate(config,ledger,attempts):
             # Preserve the exact measured stop evidence at its owning terminal
             # admission. Reporting must not trust a later self-checksummed file.
             ledger.finish(aid,'failed',{'exception':forecast['stop_reason']},
-                          {'calibration':file_reference(config.paths['results']/'calibration.json'),
+                          {'calibration':file_reference(calibration_path),
                            'attempts':file_reference(workload_path)})
             raise StageBlocked(forecast['stop_reason'])
         policy=forecast['policy']
         resolved=replace(resolved,encoder={**resolved.encoder,'batch_size':policy['embedding_batch_size']},
                          numerics={**resolved.numerics,'score_chunk_size':policy['score_chunk_size']})
-        atomic_write_json(config.paths['results']/'calibration_config.json',config_record(resolved))
-        files={'calibration':config.paths['results']/'calibration.json','attempts':workload_path,
-               'policy':config.paths['results']/'calibration_config.json',
+        policy_path=_publication_path(config,'calibration_config',aid)
+        atomic_write_json(policy_path,config_record(resolved))
+        files={'calibration':calibration_path,'attempts':workload_path,
+               'policy':policy_path,
                **{f'cache_{name}':cache_path/name for name in ('manifest.json','vectors.npy','item_ids.npy')}}
         if workload_path.with_suffix('.jsonl').exists():
             files['attempt_journal']=workload_path.with_suffix('.jsonl')
-        result=save_stage(config,'calibrate',inputs,files,attempts,forecast=forecast)
+        if remeasurement:
+            files['previous_calibration']=Path(remeasurement['previous_publication']['path'])
+        result=save_stage(config,'calibrate',inputs,files,attempts,forecast=forecast,supersedes=supersedes,
+                          execution_policy=ledger.snapshot()['execution_policy'])
+        ledger.finish(aid,'completed',{}, {'calibration':result['artifacts']['calibration'],
+                      'attempts':file_reference(workload_path),'calibration_receipt':file_reference(stage_path(config,'calibrate'))})
     return result
 
 
@@ -289,34 +398,7 @@ def _saved_calibration(config,ledger,inputs,resolved,store,metadata):
     for aid in failed[0][1]['attempt_ids']:
         if aid!=parent['attempt_id'] and state['attempts'][aid]['status']!='completed':
             raise StageBlocked('Saved calibration has unsuccessful prerequisite work')
-    proofs=[]
-    for candidate in config.paths['results'].glob('correctness*.json'):
-        proof=json.loads(candidate.read_text()); verify_record(proof)
-        previous={**inputs,'correctness':proof['output_sha256']}
-        if measured['input_sha256']==canonical_sha256(previous):
-            proofs.append((candidate,proof))
-    if not proofs:
-        raise StageBlocked('Original calibration G1 evidence is missing')
-    proof_path,proof=proofs[0]
-    if (proof.get('status')!='completed' or proof.get('returncode')!=0
-            or not proof.get('command_attempt_ids')
-            or proof['input_sha256']!=canonical_sha256(proof['inputs'])
-            or any(state['attempts'][a]['stage']!='G1' or state['attempts'][a]['status']!='completed'
-                   for a in proof['attempt_ids'])
-            or any(state['attempts'][a].get('outputs',{}).get('returncode')!=0
-                   or state['attempts'][a]['outputs'].get('command')!=proof['command']
-                   for a in proof['command_attempt_ids'])):
-        raise StageBlocked('Original calibration G1 proof is unsuccessful or unbound')
-    current=evidence.correctness_inputs(config)
-    if any(proof['inputs'].get(key)!=current[key] for key in ('config','environment','environment_lock')):
-        raise StageBlocked('Original scientific settings or environment changed')
-    scientific=('data.py','embed.py','models.py','metrics.py','protocol.py','workload.py')
-    if any(not proof['inputs']['code'].get('src/signed_study/'+name)
-           or proof['inputs']['code']['src/signed_study/'+name]!=current['code'].get('src/signed_study/'+name)
-           for name in scientific):
-        raise StageBlocked('Measured scientific implementation changed; remeasurement is required')
-    if measured.get('policy')!=config_record(resolved):
-        raise StageBlocked('Saved calibration scientific policy changed')
+    proof_path,proof=_qualify_reuse(config,ledger,inputs,resolved,measured)
     users=select_calibration_users(list(store.development))
     probes=sorted(metadata,key=lambda i:hashlib.sha256(f'signed-study:item:{i}'.encode()).hexdigest())[:128]
     if (measured.get('calibration_user_ids')!=users or measured.get('probe_item_ids')!=probes
@@ -389,13 +471,58 @@ def _resume_calibration(config,ledger,attempts):
     with ledger.work('G2',0,0) as aid:
         attempts.append(aid)
         inputs,resolved,_,_,metadata,expected,store=_calibration_context(config,ledger)
-        if (config.paths['results']/'stages'/'calibrate.json').exists():
-            return _prerequisite(config,'calibrate',ledger,inputs)
+        supersedes=None
+        if stage_path(config,'calibrate').exists():
+            previous=read_stage(config,'calibrate')
+            if (_receipt_policy(previous)==ledger.snapshot()['execution_policy']
+                    and previous['input_sha256']==canonical_sha256(inputs)):
+                result=_prerequisite(config,'calibrate',ledger,inputs)
+                require_full_cohort(resolved,store,result['forecast']['planned_user_ids'],ledger.snapshot())
+                return result
+            _pre_freeze(config,ledger)
+            if (_receipt_policy(previous).get('mode')!='bounded'
+                    and _receipt_policy(previous)!=ledger.snapshot()['execution_policy']):
+                raise StageBlocked('Calibration policy identity cannot be silently replaced')
+            state=ledger.snapshot()
+            if not previous['attempt_ids'] or any(state['attempts'][a]['status']!='completed' for a in previous['attempt_ids']):
+                raise StageBlocked('Prior calibration lacks completed ledger evidence')
+            measured=calibration_measurements(config,previous)
+            proof_path,_=_qualify_reuse(config,ledger,inputs,resolved,measured)
+            if (measured.get('status')!='completed' or measured.get('repair_decisions')
+                    or measured.get('chunk_invariance') is not True
+                    or measured.get('repeatability',{}).get('accepted') is not True
+                    or previous['forecast'].get('status')!='feasible'):
+                raise StageBlocked('Only a completed numerically valid bounded calibration may be requalified')
+            parents=[state['attempts'][a] for a in previous['attempt_ids'] if state['attempts'][a]['stage']=='G2'
+                     and state['attempts'][a]['evaluations']>0]
+            publication=previous['artifacts']['calibration']
+            reused=measured.get('reused_measurement_provenance')
+            if reused:
+                owner=state['attempts'][reused['parent_attempt_id']]
+                verify_reference(reused['parent_publication'])
+                if (owner['stage']!='G2' or owner['evaluations']<=0
+                        or owner['status']!=reused['parent_status'] or owner['status'] not in ('completed','failed')
+                        or owner.get('outputs',{}).get('calibration',reused['parent_publication'])!=reused['parent_publication']
+                        or reused['workload']!=previous['artifacts']['attempts']):
+                    raise StageBlocked('Original reused calibration workload owner/publication changed')
+                parents=[owner]; publication=reused['parent_publication']
+            if len(parents)!=1: raise StageBlocked('Original calibration workload accounting is ambiguous')
+            supersedes=file_reference(stage_path(config,'calibrate'))
+            workload=Path(previous['artifacts']['attempts']['path'])
+            journal=Path(previous['artifacts']['attempt_journal']['path']) if 'attempt_journal' in previous['artifacts'] else None
+            provenance=dict(parent_attempt_id=parents[0]['attempt_id'],parent_status=parents[0]['status'],
+                parent_publication=publication,previous_publication=previous['artifacts']['calibration'],previous_receipt=supersedes,
+                workload=previous['artifacts']['attempts'],original_correctness=file_reference(proof_path),
+                original_input_sha256=measured['input_sha256'],original_forecast=measured['forecast'],
+                reused_evaluations=measured['actual_evaluations'],new_evaluations=0)
+        else:
+            _pre_freeze(config,ledger)
+            measured,provenance,workload,journal=_saved_calibration(config,ledger,inputs,resolved,store,metadata)
         cache_path=resolved.paths['cache']/'embeddings'
         load_embedding_cache(cache_path,expected)
-        measured,provenance,workload,journal=_saved_calibration(config,ledger,inputs,resolved,store,metadata)
         forecast=forecast_scale(measured,store,ledger)
         if forecast['status']!='feasible': raise StageBlocked(forecast['stop_reason'])
+        require_full_cohort(resolved,store,forecast['planned_user_ids'],ledger.snapshot())
         policy=forecast['policy']
         resolved=replace(resolved,encoder={**resolved.encoder,'batch_size':policy['embedding_batch_size']},
                          numerics={**resolved.numerics,'score_chunk_size':policy['score_chunk_size']})
@@ -405,14 +532,46 @@ def _resume_calibration(config,ledger,attempts):
         adopted['output_sha256']=canonical_sha256(adopted)
         path=config.paths['results']/f'calibration-resumed-{aid}.json'
         atomic_write_json(path,adopted)
-        policy_path=config.paths['results']/'calibration_config.json'
+        policy_path=_publication_path(config,'calibration_config',aid)
         atomic_write_json(policy_path,config_record(resolved))
-        files={'calibration':path,'policy':policy_path,'attempts':workload,'attempt_journal':journal,
+        files={'calibration':path,'policy':policy_path,'attempts':workload,
                **{f'cache_{name}':cache_path/name for name in ('manifest.json','vectors.npy','item_ids.npy')},
                'original_calibration':Path(provenance['parent_publication']['path']),
                'original_correctness':Path(provenance['original_correctness']['path'])}
-        return save_stage(config,'calibrate',inputs,files,attempts,forecast=forecast,
-                          reused_measurement_provenance=provenance)
+        if journal: files['attempt_journal']=journal
+        if supersedes:
+            files['previous_receipt']=Path(supersedes['path'])
+            files['previous_calibration']=Path(provenance['previous_publication']['path'])
+        result=save_stage(config,'calibrate',inputs,files,attempts,forecast=forecast,supersedes=supersedes,
+                          reused_measurement_provenance=provenance,execution_policy=ledger.snapshot()['execution_policy'])
+        ledger.finish(aid,'completed',{}, {'calibration':result['artifacts']['calibration'],
+                      'calibration_receipt':file_reference(stage_path(config,'calibrate'))})
+        return result
+
+
+def _downstream_receipt(config,ledger,name,inputs,calibration,smoke=None):
+    """Only explicit calibration supersession permits new downstream receipts."""
+    path=stage_path(config,name)
+    if not path.exists(): return None,None
+    previous=read_stage(config,name)
+    if previous['input_sha256']==canonical_sha256(inputs):
+        return _prerequisite(config,name,ledger,inputs),None
+    reference=calibration.get('supersedes')
+    if reference is None:
+        raise StageBlocked(f'{name} inputs changed without an explicit calibration supersession')
+    verify_reference(reference)
+    old_calibration=json.loads(Path(reference['path']).read_text()); verify_record(old_calibration)
+    if previous['inputs'].get('calibrate')!=old_calibration['output_sha256']:
+        raise StageBlocked(f'{name} does not belong to the explicitly superseded calibration')
+    if name=='develop':
+        old_smoke=smoke.get('supersedes')
+        if old_smoke is None: raise StageBlocked('Development supersession requires the original smoke identity')
+        verify_reference(old_smoke)
+        old=json.loads(Path(old_smoke['path']).read_text()); verify_record(old)
+        if previous['inputs'].get('smoke')!=old['output_sha256']:
+            raise StageBlocked('Development does not belong to the explicitly superseded smoke')
+    _pre_freeze(config,ledger)
+    return None,file_reference(path)
 
 
 def _smoke(config,ledger,attempts):
@@ -420,11 +579,12 @@ def _smoke(config,ledger,attempts):
         attempts.append(check)
         inputs,resolved,_,_,_,expected,store=_calibration_context(config,ledger)
         calibration=_prerequisite(config,'calibrate',ledger,inputs)
+        require_full_cohort(resolved,store,calibration['forecast']['planned_user_ids'],ledger.snapshot())
         cache=load_embedding_cache(resolved.paths['cache']/'embeddings',expected)
-        resolved=load_config(config.paths['results']/'calibration_config.json')
+        resolved=load_config(Path(calibration['artifacts']['policy']['path']))
         inputs={'calibrate':calibration['output_sha256'],'development_users':8}
-        if (config.paths['results']/'stages'/'smoke.json').exists():
-            return _prerequisite(config,'smoke',ledger,inputs)
+        existing,supersedes=_downstream_receipt(config,ledger,'smoke',inputs,calibration)
+        if existing: return existing
     users=calibration['forecast']['planned_user_ids']['development'][:8]
     if len(users)!=8:
         raise StageBlocked('Smoke requires eight planned development users')
@@ -438,7 +598,7 @@ def _smoke(config,ledger,attempts):
         artifacts={'attempts':path}
         if path.with_suffix('.jsonl').exists():
             artifacts['attempt_journal']=path.with_suffix('.jsonl')
-        result=save_stage(config,'smoke',inputs,artifacts,attempts,development_user_ids=users,
+        result=save_stage(config,'smoke',inputs,artifacts,attempts,supersedes=supersedes,development_user_ids=users,
                           actual_evaluations=measurements['actual_evaluations'])
     return result
 
@@ -447,14 +607,15 @@ def _develop(config,ledger,attempts):
     from .development import execute_development
     with ledger.work('G3',0,0) as check:
         attempts.append(check)
-        inputs,_,_,_,_,expected,store=_calibration_context(config,ledger)
+        inputs,resolved,_,_,_,expected,store=_calibration_context(config,ledger)
         calibration=_prerequisite(config,'calibrate',ledger,inputs)
+        require_full_cohort(resolved,store,calibration['forecast']['planned_user_ids'],ledger.snapshot())
         smoke=_prerequisite(config,'smoke',ledger,{'calibrate':calibration['output_sha256'],'development_users':8})
-        resolved=load_config(config.paths['results']/'calibration_config.json')
+        resolved=load_config(Path(calibration['artifacts']['policy']['path']))
         cache=load_embedding_cache(resolved.paths['cache']/'embeddings',expected)
         inputs={'calibrate':calibration['output_sha256'],'smoke':smoke['output_sha256']}
-        if (config.paths['results']/'stages'/'develop.json').exists():
-            return _prerequisite(config,'develop',ledger,inputs)
+        existing,supersedes=_downstream_receipt(config,ledger,'develop',inputs,calibration,smoke)
+        if existing: return existing
         measurements=calibration_measurements(config,calibration)
     result=execute_development(resolved,ledger,store,cache,measurements,attempt_ids=attempts)
     files={'development':config.paths['results']/result['artifact_name']}
@@ -465,7 +626,7 @@ def _develop(config,ledger,attempts):
         return result
     with ledger.work('G3',0,0) as aid:
         attempts.append(aid)
-        return save_stage(config,'develop',inputs,files,attempts,
+        return save_stage(config,'develop',inputs,files,attempts,supersedes=supersedes,
                           complete_suite_eligible=result['complete_suite_eligible'],
                           confirmation_outcomes_accessed=False)
 

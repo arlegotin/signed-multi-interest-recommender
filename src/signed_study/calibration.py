@@ -28,6 +28,20 @@ def user_digest(user_id):
     return hashlib.sha256(f'signed-study:{user_id}'.encode()).hexdigest()
 
 
+def require_full_cohort(config,cohort,planned,state):
+    """Backstop policy against audited episode IDs, never forecast-claimed counts."""
+    if not results_first(state):
+        return
+    dataset=cohort.audit['dataset']
+    counts={'ml-1m':(418,1776),'ml-100k':(62,225)}
+    if dataset!=config.dataset or dataset not in counts:
+        raise ValueError('Results-first full cohort requires the original official dataset')
+    for role,count in zip(('development','confirmation'),counts[dataset]):
+        expected=sorted([e.history.user_id for e in getattr(cohort,role)],key=user_digest)
+        if len(expected)!=count or len(set(expected))!=count or planned.get(role)!=expected:
+            raise ValueError(f'Results-first requires the full audited digest-ordered {role} cohort')
+
+
 def select_calibration_users(episodes: list[Episode]) -> list[int]:
     if len(episodes) < 32:
         raise ValueError('Calibration requires at least 32 development users')
