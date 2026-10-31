@@ -227,7 +227,7 @@ def test_embedding_local_cpu_boundary_is_frozen_and_accounts_actual_tokens(embed
     from types import SimpleNamespace
     from signed_study.embed import load_encoder
 
-    state = {"grad": True, "frozen": False}
+    state = {"grad": True, "frozen": False, "threads": None}
     float32 = object()
 
     class NoGrad:
@@ -239,6 +239,7 @@ def test_embedding_local_cpu_boundary_is_frozen_and_accounts_actual_tokens(embed
 
     class Model:
         def __init__(self, path, **kwargs):
+            assert state["threads"] == 1  # policy precedes any model construction
             assert path == embedding_inputs["encoder_provenance"]["model_path"]
             assert kwargs["device"] == "cpu" and kwargs["local_files_only"]
             assert kwargs["trust_remote_code"] is False and kwargs["token"] is False
@@ -271,9 +272,12 @@ def test_embedding_local_cpu_boundary_is_frozen_and_accounts_actual_tokens(embed
             assert kwargs["prompt"] == ""
             return np.ones((len(texts), 384), dtype=np.float32)
 
-    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(float32=float32, no_grad=NoGrad))
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(float32=float32, no_grad=NoGrad,
+        set_num_threads=lambda n:state.update(threads=n), get_num_threads=lambda:state["threads"]))
     monkeypatch.setitem(sys.modules, "sentence_transformers", SimpleNamespace(SentenceTransformer=Model))
     encoder = load_encoder(embedding_inputs["config"], embedding_inputs["encoder_provenance"])
+    assert encoder.thread_policy["torch_num_threads"] == 1
+    assert encoder.thread_policy["inference_workers"] == 1
     assert encoder.token_lengths(["one"]) == [300]
     assert encoder.encode(["one"], batch_size=32).shape == (1, 384)
 
@@ -872,7 +876,8 @@ def test_recorded_command_counts_failed_validation_and_preserves_outputs(budget_
     assert ledger.snapshot()['attempted_evaluations'] == 0
 
 
-def test_recorded_command_terminates_child_on_limit(budget_case, tmp_path, monkeypatch):
+@pytest.mark.parametrize('stage',['G1','repair'])
+def test_recorded_command_terminates_child_on_limit(budget_case, tmp_path, monkeypatch, stage):
     import sys
     from signed_study.budget import BudgetExceeded
 
@@ -889,7 +894,7 @@ def test_recorded_command_terminates_child_on_limit(budget_case, tmp_path, monke
     with pytest.raises(BudgetExceeded, match='synthetic command limit'):
         ledger.run_command([sys.executable, '-c',
                             'import os,pathlib,time; pathlib.Path(__import__("sys").argv[1]).write_text(str(os.getpid())); time.sleep(20)',
-                            str(child_pid)], stage='G1', projected_seconds=1)
+                            str(child_pid)], stage=stage, projected_seconds=1)
     import os
     with pytest.raises(ProcessLookupError):
         os.kill(int(child_pid.read_text()), 0)

@@ -90,6 +90,10 @@ class ResourceSampler:
     def __call__(self):
         if time.monotonic() - self._disk_at >= 5:
             self.refresh_disk()
+        return self.sample_current()
+
+    def sample_current(self):
+        """Bounded live memory check; disk refresh belongs to normal checkpoints."""
         process = psutil.Process()
         rss = process.memory_info().rss
         try:
@@ -211,15 +215,24 @@ class Ledger:
         self._last_checkpoint = -math.inf
         self._timer = None
         self._cached = None
+        self._critical_depth = 0
+        self._alarm_active = False
+        self._monitor_state = None
 
     @contextmanager
     def _critical(self):
         # Never let our interval interrupt append/fsync or ownership transitions.
+        # Python handlers may run after a worker thread receives the signal.
+        # The Python guard remains set while restoring the calling thread mask.
+        self._critical_depth += 1
         previous = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM})
         try:
             yield
         finally:
-            signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+            try:
+                signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+            finally:
+                self._critical_depth -= 1
 
     def _append(self, event, **fields):
         row = dict(schema_version=1, event=event, recorded_at=self.wall_clock(), **fields)
@@ -250,10 +263,11 @@ class Ledger:
             self._lock = None
         self._cached = None
 
-    def _sample(self, boundary=False):
+    def _sample(self, boundary=False, interrupt=False):
         if boundary and hasattr(self.sampler, 'refresh_disk'):
             self.sampler.refresh_disk()
-        measurements = self.sampler()
+        sampler = getattr(self.sampler, "sample_current", self.sampler) if interrupt else self.sampler
+        measurements = sampler()
         required = ('installed_ram_bytes', 'available_memory_bytes', 'rss_bytes',
                     'project_disk_bytes', 'free_disk_bytes')
         for key in required:
@@ -500,6 +514,9 @@ class Ledger:
                 self._active, self._started = attempt_id, began
                 self._peak = sample['rss_bytes']
                 self._last_checkpoint = began
+                self._monitor_state = dict(state, stage_seconds=dict(state['stage_seconds']),
+                                           attempted_evaluations=state['attempted_evaluations'] + evaluations)
+                self._monitor_stage = stage
                 self._start_watchdog()
                 return attempt_id
             except BaseException:
@@ -579,13 +596,24 @@ class Ledger:
             signal.setitimer(signal.ITIMER_REAL, max(0.000001, delay - elapsed), interval)
 
     def _alarm(self, *_):
+        # Coalesce ticks during sampling/ownership transitions. Never walk disk,
+        # replay or append the ledger in interrupt context. Manual checkpoints
+        # and terminal accounting retain those costs and all failure evidence.
+        if self._critical_depth or self._alarm_active or self._active is None:
+            return
+        self._alarm_active = True
         try:
-            self.checkpoint()
+            sample = self._sample(interrupt=True)
+            state = dict(self._monitor_state, stage_seconds=dict(self._monitor_state['stage_seconds']))
+            self._charge(state, self._monitor_stage, max(0, self.clock() - self._started))
+            self._limits(state, self._monitor_stage, 0, 0, sample)
         except BaseException:
-            # The owning context/command cleans up its work before releasing the lock.
+            # The owning context/command cleans up before releasing the lock.
             with self._critical():
                 self._stop_watchdog()
             raise
+        finally:
+            self._alarm_active = False
 
     @contextmanager
     def work(self, stage: str, projected_seconds: float, evaluations: int):
@@ -611,8 +639,8 @@ class Ledger:
         after terminating that group. Unverifiable cleanup leaves an unfinished
         command that blocks admission on reopen, including after close()/exit.
         """
-        if stage not in ('G1', 'setup'):
-            raise ValueError('Command accounting is for G1 validation or setup')
+        if stage not in ('G1', 'setup', 'repair'):
+            raise ValueError('Command accounting is for G1/repair validation or setup')
         attempt = self.admit(stage, projected_seconds, evaluations=0)
         process = None
         cleanup = None

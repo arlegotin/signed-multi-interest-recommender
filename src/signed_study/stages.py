@@ -189,10 +189,11 @@ def _calibrate(config,ledger,attempts):
     kwargs=dict(encoder_provenance=provenance,dataset_manifest=manifest,checkpoint=ledger.checkpoint)
     with ledger.work('G2',15,0) as aid:
         attempts.append(aid)
+        encoder=timed('cold_model_load_seconds',lambda:load_encoder(resolved,provenance))
         with threadpool_limits(limits=resolved.timing['blas_threads']):
-            encoder=timed('cold_model_load_seconds',lambda:load_encoder(resolved,provenance))
             probe=timed('probe_seconds',lambda:encode_probe(metadata,resolved,item_ids=probe_ids,encoder=encoder,**kwargs))
             repeat=timed('repeat_seconds',lambda:encode_probe(metadata,resolved,item_ids=repeat_ids,encoder=encoder,**kwargs))
+            measurements['encoder_probe_policy']=dict(getattr(encoder,'thread_policy',{}),threadpools=threadpool_info())
         measurements['repeatability']=check_repeatability(probe.raw_rows(repeat_ids),repeat.raw_rows(repeat_ids))
         measurements['probe_resources']=ledger.checkpoint()
         probe_record={**measurements,'output_sha256':canonical_sha256(measurements)}
@@ -205,6 +206,7 @@ def _calibrate(config,ledger,attempts):
         attempts.append(aid)
         with threadpool_limits(limits=resolved.timing['blas_threads']):
             timed('catalog_encode_seconds',lambda:encode_items(metadata,resolved,encoder=encoder,**kwargs))
+            measurements['encoder_catalog_policy']=dict(getattr(encoder,'thread_policy',{}),threadpools=threadpool_info())
         cache=timed('cache_load_verify_seconds',lambda:load_embedding_cache(cache_path,expected))
         measurements['cache_resources']=ledger.checkpoint()
     del encoder

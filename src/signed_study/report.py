@@ -6,6 +6,8 @@ its G6 accounting. Historical validation cannot authorize opening outcomes.
 import csv
 from dataclasses import replace
 import json
+import math
+import re
 import os
 from pathlib import Path
 from statistics import fmean
@@ -46,11 +48,9 @@ def _outcome(saved,invalid,resource_limited,delta):
         return 'invalid experiment'
     if resource_limited:
         return 'practical infeasibility'
-    if (not saved or saved['interpretation']!='confirmatory' or saved['status']!='completed'
-            or not saved.get('complete_suite_eligible') or not saved.get('primary')):
+    if not saved or saved['interpretation']!='confirmatory' or not saved.get('primary'):
         return 'inconclusive evidence'
     primary=saved['primary']
-    if primary.get('n_missing',0): return 'inconclusive evidence'
     if primary['low']>delta: return 'supported contribution'
     if primary['high']<delta: return 'informative negative result'
     return 'inconclusive evidence'
@@ -58,8 +58,104 @@ def _outcome(saved,invalid,resource_limited,delta):
 
 def _aggregate(comparison):
     # Explicit export allowlist: never copy individual users/bounds/labels.
-    return {k:comparison.get(k) for k in ('sample_mean_low','sample_mean_high','low','high',
-                                         'n_users','n_complete','n_missing')}
+    result={k:comparison.get(k) for k in ('sample_mean_low','sample_mean_high','low','high',
+                                         'n_users','n_complete','n_missing','standard_error')}
+    complete=comparison.get('complete_case',{})
+    result['complete_case']={k:complete.get(k) for k in ('mean_difference','standard_error','n_users')}
+    result['complete_case']['label']='complete_case_diagnostic'
+    return result
+
+
+def _primary_decision(saved,invalid,delta):
+    if invalid or saved and saved['interpretation']=='invalid_confirmatory':
+        return 'invalid; no primary comparative conclusion'
+    if not saved or not saved.get('primary'):
+        return 'unavailable'
+    from .metrics import interpret_interval
+    labels=interpret_interval(saved['primary']['low'],saved['primary']['high'],delta)
+    scope='frozen B* and whole scheduled cohort'
+    if saved['interpretation']!='confirmatory':
+        return 'exploratory only; '+', '.join(labels)+'; '+scope
+    return ', '.join(labels)+'; '+scope+'; independent of unrelated comparator coverage'
+
+
+def _suite_conclusion(saved,invalid,delta):
+    if invalid or not saved or saved['interpretation']!='confirmatory':
+        return 'not established; no valid confirmatory suite'
+    comparisons=saved.get('comparisons',{})
+    if not saved.get('complete_suite_eligible'):
+        return 'not established; missing, invalid or bounded comparator/tuning coverage'
+    if not comparisons or any(r.get('low') is None or r['low']<=delta for r in comparisons.values()):
+        return 'not established; required intervals do not all support practical superiority'
+    return 'supported within the tested scope and saved required comparisons'
+
+
+def _practical_qualification(saved,invalid):
+    if invalid or not saved or saved['interpretation']!='confirmatory':
+        return 'No confirmatory practical recommendation from invalid, exploratory or unavailable evidence.'
+    required={s['name'] for s in saved.get('comparison_schedule',[]) if s.get('role','selected')!='matched_control'}
+    stronger=[]
+    for name,r in saved.get('comparisons',{}).items():
+        # An incomplete-case mean is never substituted for a full-cohort mean.
+        if name not in required or r.get('n_missing',0) or r.get('sample_mean_low') is None:
+            continue
+        if r['sample_mean_low']==r.get('sample_mean_high') and r['sample_mean_low']<0:
+            if r.get('high') is not None and r['high']<0:
+                stronger.append(f'The practical case is absent relative to {name}: its higher confirmation mean and interval demonstrate harm for SignedMax.')
+            else:
+                stronger.append(f'The practical case is weakened by {name}: its confirmation mean is higher; interval uncertainty remains.')
+    return ' '.join(stronger) or 'No verified higher full-cohort comparator mean is established; this does not establish complete-suite superiority.'
+
+
+def _repair_summaries(state,problems):
+    """Read only hashed G0 publications and reconcile their exact event window."""
+    summaries=[];seen=set();attempts=state.get('attempts',{});events=state.get('events',[])
+    for publication in attempts.values():
+        ref=publication.get('outputs',{}).get('repair_log')
+        if not ref or publication['stage']!='G0' or publication['status']!='completed': continue
+        identity=(ref.get('path'),ref.get('sha256'))
+        if identity in seen: continue
+        seen.add(identity)
+        try:
+            verify_reference(ref)
+            value=json.loads(Path(ref['path']).read_text());verify_record(value)
+            begin,end=value['ledger_event_start'],value['ledger_event_end']
+            if type(begin) is not int or type(end) is not int or not 0<=begin<end<=len(events):
+                raise ValueError('Invalid repair accounting window')
+            window=events[begin:end]
+            publication_start=next(i for i,e in enumerate(events)
+                if e['event']=='start' and e['attempt_id']==publication['attempt_id'])
+            if end>publication_start or any(e['event']=='overhead' and e['stage'] not in ('G1','repair') for e in window):
+                raise ValueError('Repair accounting window is not prior validation work')
+            ids=value['validation_attempt_ids'];repair=value['repair_attempt_id']
+            starts=[e for e in window if e['event']=='start']
+            finishes=[e for e in window if e['event']=='finish']
+            if (len(ids)!=len(set(ids)) or set(ids)!={e['attempt_id'] for e in starts}
+                    or set(ids)!={e['attempt_id'] for e in finishes}
+                    or any(e['stage'] not in ('G1','repair') or e['evaluations']!=0 for e in starts)
+                    or [e['attempt_id'] for e in starts if e['stage']=='repair']!=[repair]
+                    or any(attempts[a]['status']=='unfinished' for a in ids)):
+                raise ValueError('Repair validation attempts do not match current accounting')
+            costs=[e['elapsed_seconds'] for e in window if e['event'] in ('overhead','finish')]
+            total=math.fsum(costs)
+            cycle=sum(e['event']=='start' and e['stage']=='repair' for e in events[:end])
+            if (type(value['attributed_seconds']) not in (int,float)
+                    or not math.isfinite(value['attributed_seconds'])
+                    or not math.isclose(total,value['attributed_seconds'],rel_tol=0,abs_tol=1e-6)
+                    or not 0<=total<=1200 or value['repair_cycle']!=cycle or not 1<=cycle<=2):
+                raise ValueError('Repair cost/cycle disagrees with ledger')
+            if any(a not in attempts or attempts[a]['status']=='completed' for a in value['failure_attempt_ids']):
+                raise ValueError('Repair original failure not retained')
+            verify_reference(value['failure_trace'])
+            if (not re.fullmatch('[0-9a-f]{40}',value['source_base'])
+                    or not re.fullmatch('[0-9a-f]{64}',value['source_sha256'])
+                    or not value['review_ids'] or any(r not in {f'R{i}' for i in range(1,10)} for r in value['review_ids'])):
+                raise ValueError('Invalid repair identity/review fields')
+            summaries.append({k:value[k] for k in ('review_ids','source_base','source_sha256','repair_cycle','attributed_seconds')}
+                             | dict(validation_attempt_count=len(ids),repair_status=attempts[repair]['status']))
+        except (ValueError,OSError,KeyError,TypeError) as error:
+            problems.append(f'Repair publication invalid: {error}')
+    return summaries
 
 
 def _figures(root,comparisons):
@@ -352,13 +448,15 @@ def render_report(results_directory: Path) -> dict:
     rows=[dict(comparator=name,**_aggregate(value)) for name,value in comparisons.items()]
     tables=[]
     if rows:
-        tables.append(_table(root/'comparisons.csv',['comparator',*list(_aggregate({}))],rows))
+        tables.append(_table(root/'comparisons.csv',['comparator',*list(_aggregate({}))],
+                             [{**row,'complete_case':_json(row['complete_case'])} for row in rows]))
     cost_rows=[dict(stage=stage,seconds=seconds,limit_seconds=state.get('stage_limits',{}).get(stage),
                     failed_seconds=sum(a['elapsed_seconds'] for a in attempts.values() if a['stage']==stage and a['status']!='completed'))
                for stage,seconds in state.get('stage_seconds',{}).items()]
     cost_rows.append(dict(stage='setup',seconds=state.get('setup_seconds',0),limit_seconds=2700,
                           failed_seconds=sum(a['elapsed_seconds'] for a in attempts.values() if a['stage']=='setup' and a['status']!='completed')))
     tables.append(_table(root/'costs.csv',['stage','seconds','limit_seconds','failed_seconds'],cost_rows))
+    repair_summaries=_repair_summaries(state,problems)
     actual_work=_actual_work(root,ledger,payload,stage_records,problems,state)
     tables.append(_table(root/'actual-work.csv',['work','reserved','attempted','completed','failed','unfinished','unavailable','pilot_attempted','status','evidence'],actual_work))
     metric_rows=[]
@@ -398,6 +496,7 @@ def render_report(results_directory: Path) -> dict:
          'practical infeasibility':'The recorded resource stop limits the specified schedule under the caps; a timeout is not a scientific refutation.',
          'invalid experiment':'Comparative conclusions are not valid. Preserve attempted evidence and resolve the recorded validity failure.',
          'inconclusive evidence':'Evidence does not justify a practical comparative recommendation.'}[outcome],
+        _practical_qualification(saved,invalid),
         '', '## 2. Execution and hardware',
         'Historical evidence validation only; no fresh authorization to expose labels or execute stages. Current source HEAD, encoder installation and caches are not revalidated.',
         'Hardware (saved inspection; '+('ledger publication verified' if environment_bound else 'not externally verified')+'): '+_json({k:environment.get('hardware',{}).get(k) for k in ('system','machine','chip','installed_ram_bytes','logical_cpus')}),
@@ -417,6 +516,9 @@ def render_report(results_directory: Path) -> dict:
         'Frozen protocol: '+(saved['lock_sha256'] if saved else 'not verified/reached'),
         '', '## 4. Primary effect and required comparisons',f'Frozen primary B*: {primary_name}; delta=0.01. Confirmation never reselects B*.',
         'Interpretation: '+(saved['interpretation'].replace('_',' ') if saved else 'no confirmation interpretation'),
+        'Primary decision: '+_primary_decision(saved,invalid,delta),
+        'Complete-suite conclusion: '+_suite_conclusion(saved,invalid,delta),
+        'Paired standard error and labeled descriptive complete_case_diagnostic are exported below; the whole-cohort envelope remains primary.',
         'Primary saved aggregate: '+_json(_aggregate(saved.get('primary',{})) if saved else {}),
         'All saved comparisons: '+_json(rows) if rows else 'No benchmark observations/inference available; no benchmark table invented.',
         'Descriptive completed-case saved metric means (not full-cohort inference): '+_json(metric_rows),
@@ -462,7 +564,8 @@ def render_report(results_directory: Path) -> dict:
         'Confirmation stop reason: '+str(saved.get('stop_reason') if saved else 'not executed/unavailable'),
         'Saved method failures (aggregate counts; no automatic retry): '+_json(failure_rows),
         'Persistent journal validity/correction reasons: '+_json(qualifications),
-        'Failed/unfinished ledger work: '+_json([{k:a.get(k) for k in ('stage','status','elapsed_seconds','evaluations')} for a in attempts.values() if a['status']!='completed']),
+        'Failed/unfinished ledger work: '+_json([{**{k:a.get(k) for k in ('stage','status','elapsed_seconds','evaluations')},'exception':a.get('measurements',{}).get('exception')} for a in attempts.values() if a['status']!='completed']),
+        'Verified material repair summaries (historical implementation deviations, not scientific evidence): '+_json(repair_summaries),
         'Invalid/missing baselines and bounded tuning limit complete-suite claims. Endpoint coverage: '+_json(selected.get('endpoint_coverage',{}))+'; boundary winners: '+_json(selected.get('boundary_winners',[]))+'; missing required families: '+_json(selected.get('missing_required_families',[]))+'; incomplete configurations: '+str(len(selected.get('incomplete_configuration_ids',[]))),
         'Numerical tolerances: '+_json(payload.get('config',{}).get('numerics','not available'))+'; deviations: '+_json(payload.get('deviations',[])),
         'Leakage protection requires frozen development selection, verified lock and exposure journal. Historical reading validates saved anchors, not current implementation correctness. Float32 timing does not change the canonical float64 accuracy backend. Wider data/representation coverage remains unresolved.',

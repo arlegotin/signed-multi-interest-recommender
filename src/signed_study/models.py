@@ -13,6 +13,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.svm import SVC
 
 from .data import History
+from .budget import BudgetExceeded
 from .protocol import StudyConfig, canonical_sha256
 
 
@@ -321,6 +322,8 @@ def fit_user(method, history: History, embeddings, parameters, *, config: StudyC
             try:
                 prototypes = spherical_prototypes(positive, np.asarray(positive_ids), parameters.get('K', 1),
                                                   max_updates=limits['prototype_max_updates'])
+            except BudgetExceeded:
+                raise
             except Exception as error:
                 _failed(diagnostics, 'exception')
                 diagnostics['exception'] = {'category': type(error).__name__, 'message': str(error)}
@@ -373,6 +376,8 @@ def fit_user(method, history: History, embeddings, parameters, *, config: StudyC
             if (not np.isfinite(training_scores).all()
                     or any(not np.isfinite(value).all() for value in model.state.values())):
                 _failed(diagnostics, 'nonfinite')
+        except BudgetExceeded:
+            raise
         except Exception as error:
             _failed(diagnostics, 'exception')
             diagnostics['exception'] = {'category': type(error).__name__, 'message': str(error)}

@@ -180,6 +180,53 @@ def refresh_selected_forecast(result,store,timings,config,ledger,calibration):
                 stop_reason=None if feasible else 'Concrete selected schedule exceeds remaining budget or admitted allowances')
 
 
+def endpoint_campaign_forecast(cohort, entries, requests, timings, store, calibration, config, ledger, expansion_seconds):
+    """Outcome-free upper bound for every possible selected/matched slot.
+
+    Each slot uses the largest cost across all eligible initial/endpoint
+    parameters. The maximizers may differ by stage; this remains conservative
+    without learning an endpoint winner from outcomes.
+    """
+    candidates=list(entries)+list(requests)
+    for entry in list(candidates):
+        if entry.family=='SignedMax':
+            candidates.extend([model_configuration('MeanNegative',entry.parameters),
+                               model_configuration('SignedMax',{'K':1,'lambda':entry.parameters['lambda']})])
+    candidates=list({e.id:e for e in candidates}.values())
+    schedule=planned_comparison_schedule()
+    confirmation={e.history.user_id:e for e in store.confirmation}
+    planned=[confirmation[u] for u in calibration['forecast']['planned_user_ids']['confirmation']]
+    development={e.history.user_id:e for e in store.development}
+    timing_users=calibration['calibration_user_ids']
+    catalog=calibration['forecast'].get('catalog_items',calibration.get('catalog_items'))
+    if type(catalog) is not int or catalog<=0:
+        raise ValueError('Endpoint campaign requires measured catalog cardinality')
+    timing_episodes=[replace(development[u],candidate_ids=tuple(range(catalog))) for u in timing_users]
+    def bound(episodes,geometric=False):
+        maxima={family:max(projected_cost(episodes,[entry],timings,config,exact_parameters=True)
+                           for entry in candidates if entry.family==family)
+                for family in {slot['fit_family'] for slot in schedule if not geometric or slot['geometric']}}
+        return sum(maxima[slot['fit_family']] for slot in schedule if not geometric or slot['geometric'])
+    repeats=config.timing['warmups']+config.timing['repetitions']
+    numerical=planned[:64]
+    seconds={'G3':expansion_seconds,'G4':bound(planned),
+             'G5':repeats*bound(timing_episodes)+bound(numerical,True)+2}
+    evaluations={'G3':len(cohort)*len(requests),'G4':len(planned)*len(schedule),
+                 'G5':len(timing_users)*len(schedule)*repeats+len(numerical)*sum(s['geometric'] for s in schedule)}
+    state=ledger.snapshot();caps=config.resources;margin=caps['safety_multiplier']
+    limits=state.get('stage_limits',caps['stage_seconds'])
+    allowance=calibration['forecast']['planning']
+    feasible=(state['attempted_evaluations']+sum(evaluations.values())<=caps['evaluation_limit']
+        and all(state['stage_seconds'][stage]+margin*cost<=limits[stage] for stage,cost in seconds.items())
+        and state['experimental_seconds']+margin*sum(seconds.values())<=caps['experimental_seconds']-caps['report_reserve_seconds']
+        and len(schedule)<=allowance['confirmation_entries']
+        and evaluations['G5']<=allowance['timing_evaluations']+allowance['numerical_diagnostic_evaluations'])
+    return dict(status='feasible' if feasible else 'infeasible',seconds=seconds,evaluations=evaluations,
+                safety_multiplier=margin,comparison_entries=len(schedule),
+                basis='maximum measured cost per possible selected/matched slot; no endpoint outcomes',
+                stop_reason=None if feasible else 'Complete remaining endpoint campaign exceeds remaining capacity')
+
+
 def execute_development(config,ledger,store,cache,calibration,*,attempt_ids=None):
     """Execute admitted fixed cohorts; callers verify provenance and smoke first."""
     users=calibration['forecast']['planned_user_ids']['development']
@@ -234,6 +281,11 @@ def execute_development(config,ledger,store,cache,calibration,*,attempt_ids=None
             with ledger.work('G3',0,0) as aid:
                 attempt_ids.append(aid)
                 seconds=projected_cost(cohort,requests,pilot_measurements,config,exact_parameters=True)
+                coverage['campaign_forecast']=endpoint_campaign_forecast(
+                    cohort,entries,requests,[*calibration['user_measurements'],*timings],
+                    store,calibration,config,ledger,seconds)
+                if coverage['campaign_forecast']['status']!='feasible':
+                    raise ValueError(coverage['campaign_forecast']['stop_reason'])
             batch(requests,seconds,'endpoints')
             entries+=requests
             coverage.update(admitted=True,expansion_batches=1)

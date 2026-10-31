@@ -83,6 +83,7 @@ def test_report_preserves_scope_without_complete_results(saved_evidence, monkeyp
     text = Path(first['report']).read_text()
     assert 'supported contribution' in text
     assert 'B*: MeanNegative' in text and 'RBFSVM' in text
+    assert 'practical case' in text and 'absent relative to RBFSVM' in text
     assert 'complete-suite' in text and 'not established' in text
     assert len([line for line in text.splitlines() if line.startswith('## ')]) == 10
     table = Path(first['tables'][0]).read_bytes()
@@ -215,7 +216,8 @@ def test_report_missing_baseline_and_analysis_pending_remain_inconclusive(saved_
         if e['kind']=='run_finished': fields['artifact']=file_reference(path)
         confirmation._event(lock,e['kind'],**fields)
     initial=report.render_report(root)
-    assert initial['outcome']=='inconclusive evidence'
+    assert initial['outcome']=='supported contribution'
+    assert 'Complete-suite conclusion: not established' in Path(initial['report']).read_text()
     initial_text=Path(initial['report']).read_text()
     # An interrupted analysis admission outside summary.attempt_ids must qualify
     # the historical result, not disappear from reporting.
@@ -437,3 +439,34 @@ def test_corrupt_ledger_renders_invalid_report_without_mutation(local_config):
         rows=list(csv.DictReader(f))
     assert rows and all(r['attempted']=='' and r['status']=='unavailable' for r in rows)
     assert 'invalid' in Path(result['report']).read_text()
+
+
+@pytest.mark.parametrize('missing',[0,1])
+def test_saved_paired_se_and_complete_case_in_report_and_table(saved_evidence,missing):
+    import csv
+    from signed_study import report,confirmation
+    from signed_study.stage_evidence import file_reference
+    root,ledger,lock,saved=saved_evidence
+    complete=dict(label='complete_case_diagnostic',n_users=2-missing,mean_difference=.03,
+                  standard_error=.01 if not missing else None)
+    saved['primary'].update(standard_error=.01 if not missing else None,complete_case=complete,n_missing=missing)
+    saved['comparisons']['MeanNegative']=saved['primary']
+    path=Path(saved['artifact_path'])
+    with ledger.work('G4',0,0) as publication:
+        saved['attempt_ids'].append(publication)
+        save(path,saved)
+        ledger.finish(publication,'completed',{}, {'confirmation':file_reference(path)})
+    events=confirmation.read_events(lock);confirmation._events_path(lock).unlink()
+    for e in events:
+        fields={k:v for k,v in e.items() if k not in ('schema_version','output_sha256','previous_sha256','lock_sha256','kind')}
+        if e['kind']=='run_finished':fields['artifact']=file_reference(path)
+        confirmation._event(lock,e['kind'],**fields)
+    rendered=report.render_report(root)
+    with (root/'comparisons.csv').open() as f: row=next(csv.DictReader(f))
+    assert row['comparator']=='MeanNegative'
+    assert row['standard_error']==('' if missing else '0.01')
+    assert json.loads(row['complete_case'])==complete
+    text=Path(rendered['report']).read_text()
+    assert 'complete_case_diagnostic' in text and 'standard_error' in text
+    assert 'Primary decision: practical_advantage' in text
+    assert 'user_ids' not in text

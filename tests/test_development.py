@@ -238,3 +238,39 @@ def test_develop_interruption_retains_live_attempt_references(pipeline,monkeypat
     actual={aid for aid in ledger.snapshot()['attempts'] if aid not in before}
     assert set(result['attempt_ids'])==actual
     assert any(ledger.snapshot()['attempts'][aid]['status']!='completed' for aid in actual)
+
+
+def test_endpoint_campaign_gate_precedes_full_outcome_batch(pipeline,monkeypatch):
+    from signed_study import development
+    config,ledger,store,cache,calibration=context(pipeline)
+    calibration['forecast']['planned_user_ids']['development']=[1,2]
+    original=development.projected_cost
+    def cost(episodes,entries,measurements,config,**kwargs):
+        # Endpoint tuning fits G3, but any endpoint solver selected on the
+        # much larger confirmation cohort exhausts G4.
+        if len(episodes)>100 and any(e.parameters.get('C') in (.001,1000) for e in entries):
+            return 10000.
+        return original(episodes,entries,measurements,config,**kwargs)
+    monkeypatch.setattr(development,'projected_cost',cost)
+    result=development.execute_development(config,ledger,store,cache,calibration)
+    assert result['endpoint_coverage']['admitted'] is False
+    assert set(result['endpoint_coverage']['unavailable'])=={r['id'] for r in result['endpoint_coverage']['requested']}
+    assert len(result['configurations'])==78
+    assert all(a['metrics'] is None for a in result['pilot_attempts'])
+    assert not any(b['kind']=='endpoints' for b in result['batches'])
+    assert result['status']=='completed' and result['complete_suite_eligible'] is False
+
+
+def test_model_budget_exception_reaches_owning_workload(pipeline,monkeypatch):
+    from signed_study import development,models
+    from signed_study.budget import BudgetExceeded
+    config,ledger,store,cache,calibration=context(pipeline)
+    calibration['forecast']['planned_user_ids']['development']=[1,2]
+    def stopped(*args,**kwargs): raise BudgetExceeded('transient prototype RSS')
+    monkeypatch.setattr(models,'spherical_prototypes',stopped)
+    with pytest.raises(BudgetExceeded,match='transient prototype RSS'):
+        development.execute_development(config,ledger,store,cache,calibration)
+    attempt=list(ledger.snapshot()['attempts'].values())[-1]
+    assert attempt['stage']=='G3' and attempt['status']=='budget_exceeded'
+    journals=list(config.paths['results'].glob('development-*-initial.jsonl'))
+    assert journals and 'interrupted' in journals[0].read_text()

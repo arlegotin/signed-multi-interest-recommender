@@ -17,6 +17,9 @@ import shutil
 import tempfile
 
 import numpy as np
+from threadpoolctl import threadpool_limits, threadpool_info
+
+from .budget import atomic_write_json
 
 from .data import Movie
 from .protocol import StudyConfig, canonical_sha256
@@ -66,6 +69,8 @@ def _pinned_revision(revision):
 
 def format_movie(title: str, genres: list[str]) -> str:
     """The fixed title/lexicographically sorted genre template, without prompts."""
+    if isinstance(title, str):
+        title = " ".join(title.split())
     if not isinstance(title, str) or not title or any(not isinstance(g, str) or not g for g in genres):
         raise ValueError("Movie title and genres must be nonempty strings")
     return _TEMPLATE.format(title=title, genres=", ".join(sorted(genres)))
@@ -122,6 +127,7 @@ def resolve_encoder(config: StudyConfig, *, api=None, download=None) -> dict:
     """Acquire only standard model/tokenizer files and one weight format.
 
     The caller owns G0 setup admission and persists this returned JSON record.
+    The immutable resolution intent is durably written before any file download.
     The revision is validated before returning; use dataclasses.replace(config,
     model_revision=result['model_revision']) explicitly, never mutate config.
     api.model_info and download are injectable network boundaries for tiny tests.
@@ -134,10 +140,27 @@ def resolve_encoder(config: StudyConfig, *, api=None, download=None) -> dict:
         from huggingface_hub import HfApi, snapshot_download
         api = HfApi() if api is None else api
         download = snapshot_download if download is None else download
-    info = api.model_info(config.model_id, revision=config.model_revision, token=False, timeout=30)
+    intent_path = config.paths['results'] / 'encoder_resolution.json'
+    revision = config.model_revision
+    if intent_path.exists():
+        intent = json.loads(intent_path.read_text())
+        expected = {'schema_version': 1, 'model_id': config.model_id,
+                    'model_revision': intent.get('model_revision')}
+        _pinned_revision(expected['model_revision'])
+        if intent != dict(expected, output_sha256=canonical_sha256(expected)):
+            raise ValueError('Encoder acquisition intent identity/digest mismatch')
+        if revision is not None and revision != intent['model_revision']:
+            raise ValueError('Configured revision conflicts with encoder acquisition intent')
+        revision = intent['model_revision']
+    info = api.model_info(config.model_id, revision=revision, token=False, timeout=30)
     _pinned_revision(info.sha)
-    if config.model_revision is not None and config.model_revision != info.sha:
+    if revision is not None and revision != info.sha:
         raise ValueError("Resolved encoder revision differs from requested revision")
+    # Durable intent is not completed acquisition or hash/license evidence.
+    # Persist before the first potentially interrupted file download.
+    if not intent_path.exists():
+        intent = dict(schema_version=1, model_id=config.model_id, model_revision=info.sha)
+        atomic_write_json(intent_path, dict(intent, output_sha256=canonical_sha256(intent)))
     names = {sibling.rfilename for sibling in info.siblings}
     weight = "model.safetensors" if "model.safetensors" in names else "pytorch_model.bin"
     selected = (names & _STANDARD_FILES) | ({weight} & names)
@@ -283,8 +306,15 @@ class _LocalEncoder:
         from sentence_transformers import SentenceTransformer
 
         self.torch = torch
+        self.threads = config.timing['blas_threads']
+        torch.set_num_threads(self.threads)
+        if torch.get_num_threads() != self.threads:
+            raise ValueError('Torch inference thread policy was not established')
+        self.thread_policy = dict(torch_num_threads=torch.get_num_threads(),
+                                  inference_workers=config.timing['inference_workers'])
         model = _verify_model(config, provenance)
-        self.model = SentenceTransformer(str(model), device="cpu", cache_folder=str(_cache_root(config) / "sentence_transformers"),
+        with threadpool_limits(limits=self.threads):
+            self.model = SentenceTransformer(str(model), device="cpu", cache_folder=str(_cache_root(config) / "sentence_transformers"),
                                          local_files_only=True, trust_remote_code=False, token=False, backend="torch",
                                          model_kwargs={"dtype": torch.float32},
                                          config_kwargs={"trust_remote_code": False},
@@ -302,7 +332,12 @@ class _LocalEncoder:
         return [len(ids) for ids in result["input_ids"]]
 
     def encode(self, texts, *, batch_size):
-        with self.torch.no_grad():
+        with threadpool_limits(limits=self.threads), self.torch.no_grad():
+            actual = self.torch.get_num_threads()
+            pools = threadpool_info()
+            if actual != self.threads or any(p['num_threads'] != self.threads for p in pools):
+                raise ValueError('Encoder runtime thread policy changed')
+            self.thread_policy.update(torch_num_threads=actual, threadpools=pools)
             return self.model.encode(texts, batch_size=batch_size, show_progress_bar=False,
                                      precision="float32", convert_to_numpy=True, device="cpu",
                                      normalize_embeddings=False, prompt="")
