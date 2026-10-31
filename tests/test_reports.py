@@ -395,3 +395,45 @@ def test_actual_work_accounts_all_stages_once_and_preserves_unknown(saved_eviden
     with ledger.work('G4',0,0): pass  # metadata/current-context read is not an evaluation
     report.render_report(root)
     assert next(Path(p).read_bytes() for p in result['tables'] if p.endswith('actual-work.csv'))==before
+
+
+def test_alternate_stage_calibration_cannot_borrow_root_publication(saved_evidence):
+    from signed_study import report
+    from signed_study.stage_evidence import file_reference
+    root,ledger,lock,_=saved_evidence
+    lock.unlink();lock.with_suffix('.sha256').unlink()
+    reason='Smallest permitted scale cannot fit remaining allocations and reserve'
+    original=save(root/'calibration.json',dict(status='completed',actual_evaluations=1,
+        forecast=dict(status='infeasible',tested_scales=[[256,1000]],stop_reason=reason)))
+    root_bytes=(root/'calibration.json').read_bytes()
+    with ledger.work('G2',0,1) as aid:
+        ledger.finish(aid,'failed',{'exception':reason},{'calibration':file_reference(root/'calibration.json')})
+    save(root/'stages'/'calibrate.failed-test.json',dict(stage='calibrate',status='blocked',artifacts={},attempt_ids=[aid],stop_reason=reason))
+    alternate=root/'alternate'/'calibration.json'
+    original['forecast']['tested_scales']=[[1,1]]
+    save(alternate,original)
+    save(root/'stages'/'calibrate.json',dict(stage='calibrate',status='completed',attempt_ids=[aid],
+        artifacts={'calibration':file_reference(alternate)},stop_reason=None))
+    result=report.render_report(root)
+    assert (root/'calibration.json').read_bytes()==root_bytes
+    assert result['outcome']=='inconclusive evidence'
+    assert any('publication' in p for p in result['limitations'])
+    # A differently spelled path to the same original file remains valid.
+    save(root/'stages'/'calibrate.json',dict(stage='calibrate',status='completed',attempt_ids=[aid],
+        artifacts={'calibration':file_reference((root/'calibration.json').resolve())},stop_reason=None))
+    assert report.render_report(root)['outcome']=='practical infeasibility'
+
+
+def test_corrupt_ledger_renders_invalid_report_without_mutation(local_config):
+    import csv
+    from signed_study import report
+    root=local_config.paths['results'];root.mkdir(parents=True,exist_ok=True)
+    path=root/'budget_ledger.jsonl';path.write_bytes(b'{corrupt accounting}\n')
+    before=path.read_bytes()
+    result=report.render_report(root)
+    assert result['outcome']=='invalid experiment' and path.read_bytes()==before
+    assert any('Corrupt ledger' in p for p in result['limitations'])
+    with next(Path(p) for p in result['tables'] if p.endswith('actual-work.csv')).open() as f:
+        rows=list(csv.DictReader(f))
+    assert rows and all(r['attempted']=='' and r['status']=='unavailable' for r in rows)
+    assert 'invalid' in Path(result['report']).read_text()

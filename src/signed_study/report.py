@@ -89,14 +89,16 @@ def _figures(root,comparisons):
     return paths
 
 
-def _actual_work(root,ledger,payload,stage_records,problems):
+def _actual_work(root,ledger,payload,stage_records,problems,state):
     """Count retained G2/G3/G4/G5 executions, independently of reservations.
 
     One unit per admitted workload (or confirmation run), never per metadata
     read. Development totals include their pilot. Scientific tables still use
     only the current selected confirmation run.
     """
-    accounting=ledger.snapshot()['attempts']; units={}; assigned=set()
+    # Reuse the validated render snapshot. A rejected/corrupt ledger supplies
+    # an empty state, yielding explicitly unavailable counts without rereading.
+    accounting=state.get('attempts',{}); units={}; assigned=set()
     def load(reference):
         verify_reference(reference)
         value=json.loads(Path(reference['path']).read_text())
@@ -154,7 +156,7 @@ def _actual_work(root,ledger,payload,stage_records,problems):
     if lock.exists() and payload:
         try:
             digest,_=protocol_lock.read_lock(lock)
-            protocol_lock.verify_lock_accounting(payload,digest,{'ledger_events':ledger.snapshot()['events']})
+            protocol_lock.verify_lock_accounting(payload,digest,{'ledger_events':state.get('events',[])})
             events=confirmation.read_events(lock)
             if any(e['lock_sha256']!=digest for e in events):raise ProtocolMismatch('Work journal lock mismatch')
             runs={e['run_id'] for e in events if e['kind'] in ('run_started','run_finished')}
@@ -299,26 +301,32 @@ def render_report(results_directory: Path) -> dict:
     for path in (lock.with_suffix('.sha256'),confirmation._events_path(lock),lock.with_name('confirmation.exposure.json')):
         if path.exists(): note(path,'retained provenance; validation/limitations reported above')
     # Only verified stage references supply acquisition/audit/calibration details.
-    details={}
+    details={};detail_references={}
     for name,ref in artifacts.items():
         if Path(ref['path']).name in ('data_manifest.json','encoder_acquisition.json','cohort_audit.json','calibration.json'):
-            try: details[Path(ref['path']).name]=json.loads(Path(ref['path']).read_text())
+            try:
+                details[Path(ref['path']).name]=json.loads(Path(ref['path']).read_text())
+                detail_references[Path(ref['path']).name]=ref
             except (ValueError,OSError) as error: problems.append(f'{name}: {error}')
     calibration=details.get('calibration.json')
-    calibration_bound=calibration is not None
+    calibration_reference=detail_references.get('calibration.json')
+    stage_calibration=calibration is not None
+    if calibration is None and (root/'calibration.json').exists():
+        calibration=read(root/'calibration.json')
+        calibration_reference=file_reference(root/'calibration.json')
     calibration_published=False
-    if (root/'calibration.json').exists():
-        reference=file_reference(root/'calibration.json')
+    if calibration_reference is not None:
+        # Authenticate the reference actually supplying the consumed values.
+        # An unrelated published root file cannot authenticate an alternate.
+        reference=calibration_reference
         calibration_published=any(a['stage']=='G2' and a.get('event')=='finish' and
             a.get('outputs',{}).get('calibration',{}).get('sha256')==reference['sha256'] and
             Path(a.get('outputs',{}).get('calibration',{}).get('path','')).resolve()==Path(reference['path']).resolve()
             for a in attempts.values())
-    if calibration is None and (root/'calibration.json').exists():
-        calibration=read(root/'calibration.json')
-        calibration_bound=calibration_published
-        if not calibration_bound:
-            problems.append('Calibration publication missing or changed; standalone measurements are unverified and cannot establish measured infeasibility')
     calibration=calibration or {}
+    calibration_bound=calibration_published or stage_calibration and (calibration.get('forecast') or {}).get('status')!='infeasible'
+    if calibration and not calibration_bound:
+        problems.append('Calibration publication missing or changed for consumed reference; measurements are unverified and cannot establish measured infeasibility')
     development={}
     if 'development' in artifacts:
         try:
@@ -351,7 +359,7 @@ def render_report(results_directory: Path) -> dict:
     cost_rows.append(dict(stage='setup',seconds=state.get('setup_seconds',0),limit_seconds=2700,
                           failed_seconds=sum(a['elapsed_seconds'] for a in attempts.values() if a['stage']=='setup' and a['status']!='completed')))
     tables.append(_table(root/'costs.csv',['stage','seconds','limit_seconds','failed_seconds'],cost_rows))
-    actual_work=_actual_work(root,ledger,payload,stage_records,problems) if ledger else []
+    actual_work=_actual_work(root,ledger,payload,stage_records,problems,state)
     tables.append(_table(root/'actual-work.csv',['work','reserved','attempted','completed','failed','unfinished','unavailable','pilot_attempted','status','evidence'],actual_work))
     metric_rows=[]
     if saved and saved.get('attempts'):
