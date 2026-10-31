@@ -166,7 +166,8 @@ def test_timer_defers_disk_walk_and_checkpoint_reentry(local_config,tmp_path,unb
     finally: ledger.close();stop.set();worker.join(timeout=1)
 
 
-def test_report_accepts_only_published_accounted_repair_log(budget_case):
+@pytest.mark.parametrize('review_id', ['R1', 'N1'])
+def test_report_accepts_only_published_accounted_repair_log(budget_case, review_id):
     from signed_study import report
     from signed_study.budget import atomic_write_json
     from signed_study.protocol import canonical_sha256
@@ -178,7 +179,7 @@ def test_report_accepts_only_published_accounted_repair_log(budget_case):
     end=len(ledger.snapshot()['events'])
     path=ledger.path.parent/'repair-log.json'
     trace=ledger.path.parent/'failure.log';trace.write_text('retained failure trace')
-    record=dict(schema_version=1,review_ids=['R1'],source_base='a'*40,source_sha256='b'*64,
+    record=dict(schema_version=1,review_ids=[review_id],source_base='a'*40,source_sha256='b'*64,
                 failure_attempt_ids=[],failure_trace=file_reference(trace),
                 validation_attempt_ids=[diagnostic,repair],repair_attempt_id=repair,repair_cycle=1,
                 ledger_event_start=start,ledger_event_end=end,attributed_seconds=5.)

@@ -20,6 +20,7 @@ import zipfile
 import numpy as np
 
 from .protocol import StudyConfig, VerifiedProtocol, canonical_sha256
+from .budget import atomic_write_json
 
 
 @dataclass(frozen=True, slots=True)
@@ -310,7 +311,9 @@ def load_dataset(config: StudyConfig) -> Dataset:
     manifest["status"] = "discrepancy" if manifest["discrepancies"] else "validated"
     manifest["input_sha256"] = SOURCES[name].sha256
     manifest["output_sha256"] = canonical_sha256({"files": manifest["files"], "counts": manifest["counts"]})
-    _write_json(config.paths["results"] / "data_manifest.json", manifest)
+    # Acquisition binds these bytes; auditor reloads must use the same durable
+    # serializer rather than changing an unchanged manifest's file identity.
+    atomic_write_json(config.paths["results"] / "data_manifest.json", manifest)
     if manifest["discrepancies"]:
         raise ValueError("Official dataset count discrepancy; inspect README/schema and document resolution")
     return dataset

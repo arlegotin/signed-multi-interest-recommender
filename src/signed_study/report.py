@@ -149,7 +149,7 @@ def _repair_summaries(state,problems):
             verify_reference(value['failure_trace'])
             if (not re.fullmatch('[0-9a-f]{40}',value['source_base'])
                     or not re.fullmatch('[0-9a-f]{64}',value['source_sha256'])
-                    or not value['review_ids'] or any(r not in {f'R{i}' for i in range(1,10)} for r in value['review_ids'])):
+                    or not value['review_ids'] or any(r not in {*(f'R{i}' for i in range(1,10)), 'N1'} for r in value['review_ids'])):
                 raise ValueError('Invalid repair identity/review fields')
             summaries.append({k:value[k] for k in ('review_ids','source_base','source_sha256','repair_cycle','attributed_seconds')}
                              | dict(validation_attempt_count=len(ids),repair_status=attempts[repair]['status']))

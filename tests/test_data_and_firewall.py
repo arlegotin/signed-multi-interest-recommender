@@ -362,6 +362,34 @@ def test_empty_cutoff_rejected():
         temporal_cutoff(())
 
 
+def test_manifest_reference_survives_acquisition_writer_and_dataset_reload(local_config, monkeypatch):
+    from signed_study.budget import atomic_write_json
+    from signed_study.stage_evidence import file_reference, verify_reference
+    content = archive_bytes('ml-1m')
+    sources = dict(data.SOURCES)
+    sources['ml-1m'] = replace(sources['ml-1m'], sha256=hashlib.sha256(content).hexdigest(), size=len(content))
+    monkeypatch.setattr(data, 'SOURCES', sources)
+    monkeypatch.setitem(data._EXPECTED_COUNTS, 'ml-1m', dict(raw_ratings=2, raw_users=1,
+        metadata_movies=2, rated_movies=2, positive_ratings=1, negative_ratings=1, neutral_ratings=0))
+    raw = local_config.paths['data'] / 'raw'
+    raw.mkdir(parents=True)
+    archive = raw / 'ml-1m.zip'
+    archive.write_bytes(content)
+    first = load_dataset(local_config)
+    manifest = local_config.paths['results'] / 'data_manifest.json'
+    atomic_write_json(manifest, first.manifest)  # The actual acquisition publication writer.
+    reference = file_reference(manifest)
+    before = manifest.read_bytes()
+    second = load_dataset(local_config)  # The real auditor path, including archive parsing and writing.
+    assert second.manifest == first.manifest
+    verify_reference(reference)
+    assert manifest.read_bytes() == before
+    archive.write_bytes(archive_bytes('ml-1m', malformed=True))
+    with pytest.raises(ValueError, match='SHA256|size|discrepancy'):
+        load_dataset(local_config)
+    assert manifest.read_bytes() == before
+
+
 def test_confirmation_permit_rejects_duplicate_membership(ninety_ratings,local_config):
     store=make_episodes(dataset_for(tuple(replace(r,user_id=2) for r in ninety_ratings)),local_config)
     permit=VerifiedProtocol('a'*64,{'data_access':{'confirmation_user_ids':[2,2],
