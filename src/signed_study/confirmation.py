@@ -140,7 +140,7 @@ def load_frozen_geometry(state,cache,lock_hash):
                      dict(P=P,N=N),dict(state['diagnostics']))
 
 
-def _summary(lock,permit,run_id,interpretation,attempts,attempt_ids,stop_reason):
+def _summary(lock,permit,run_id,interpretation,attempts,attempt_ids,stop_reason,*,analysis_attempt_ids=()):
     selected=permit.payload['development']; users=selected['confirmation_user_ids']
     auc={s['name']:{} for s in selected['comparison_schedule']}
     for row in attempts:
@@ -153,7 +153,8 @@ def _summary(lock,permit,run_id,interpretation,attempts,attempt_ids,stop_reason)
     result=dict(schema_version=1,lock_sha256=permit.lock_hash,run_id=run_id,
                 interpretation=interpretation,status='completed' if all(len(v)==len(users) for v in auc.values()) else 'partial',
                 scheduled_user_ids=users,comparison_schedule=selected['comparison_schedule'],
-                attempts=attempts,attempt_ids=attempt_ids,actual_evaluations=len(attempts),comparisons=comparisons,
+                attempts=attempts,attempt_ids=attempt_ids,analysis_attempt_ids=list(analysis_attempt_ids),
+                actual_evaluations=len(attempts),comparisons=comparisons,
                 primary_comparator=selected['B_star']['family'],primary=comparisons[selected['B_star']['family']],
                 comparison_scope='complete_suite' if selected['complete_suite_eligible'] else 'coverage_limited',
                 complete_suite_eligible=selected['complete_suite_eligible'],endpoint_coverage=selected['endpoint_coverage'],
@@ -162,6 +163,20 @@ def _summary(lock,permit,run_id,interpretation,attempts,attempt_ids,stop_reason)
     result['output_sha256']=canonical_sha256(result)
     protocol_lock.exclusive_json(path,result)
     _event(lock,'run_finished',run_id=run_id,artifact=protocol_lock.evidence.file_reference(path),interpretation=interpretation)
+    return result
+
+
+def _qualify_summary(result,ledger,interpretation):
+    """Apply final execution AND analysis accounting to every returned view."""
+    accounting=ledger.snapshot()['attempts']
+    failed=[accounting[aid]['status'] for aid in result['attempt_ids'] if accounting[aid]['status']!='completed']
+    if result['interpretation']!=interpretation or failed:
+        result=dict(result)
+        result.update(interpretation=interpretation,original_output_sha256=result.pop('output_sha256'))
+        if failed:
+            result.update(status='budget_exceeded' if 'budget_exceeded' in failed else 'partial',
+                          accounting_status=failed,stop_reason='Execution or analysis accounting did not complete successfully')
+        result['output_sha256']=canonical_sha256(result)
     return result
 
 
@@ -193,15 +208,7 @@ def _confirm(lock_path,ledger):
     if finished:
         ref=finished[-1]['artifact']; protocol_lock.evidence.verify_reference(ref)
         result=json.loads(Path(ref['path']).read_text()); verify_record(result)
-        accounting=ledger.snapshot()['attempts']
-        failed=[accounting[aid]['status'] for aid in result['attempt_ids'] if accounting[aid]['status']!='completed']
-        if result['interpretation']!=interpretation or failed:
-            result.update(interpretation=interpretation,original_output_sha256=result.pop('output_sha256'))
-            if failed:
-                result.update(status='budget_exceeded' if 'budget_exceeded' in failed else 'partial',
-                              accounting_status=failed,stop_reason='Execution accounting did not complete successfully')
-            result['output_sha256']=canonical_sha256(result)
-        return result
+        return _qualify_summary(result,ledger,interpretation)
     selected=permit.payload['development']; users=selected['confirmation_user_ids']
     rows={}
     for event in events:
@@ -216,9 +223,26 @@ def _confirm(lock_path,ledger):
     # Interrupted repairs may not acquire another repair cycle to continue.
     prior=[e for e in events if e['kind']=='run_started' and e['run_id']==run_id]
     if prior:
-        with ledger.work('G4',1,0):
-            return _summary(lock_path,permit,run_id,interpretation,attempts,
-                            [e['ledger_attempt_id'] for e in prior],'Interrupted execution; retained attempts, no automatic retry')
+        analysis_ids=[e['ledger_attempt_id'] for e in events
+                      if e['kind']=='analysis_started' and e['run_id']==run_id]
+        result=None
+        try:
+            with ledger.work('G4',1,0) as analysis_id:
+                analysis_ids.append(analysis_id)
+                _event(lock_path,'analysis_started',run_id=run_id,ledger_attempt_id=analysis_id,
+                       interpretation=interpretation)
+                result=_summary(lock_path,permit,run_id,interpretation,attempts,
+                                [e['ledger_attempt_id'] for e in prior]+analysis_ids,
+                                'Interrupted execution; retained attempts, no automatic retry',
+                                analysis_attempt_ids=analysis_ids)
+                ledger.finish(analysis_id,'completed',{},
+                              {'confirmation':protocol_lock.evidence.file_reference(result['artifact_path'])})
+        except BudgetExceeded:
+            if result is None:
+                raise
+            # The ledger records its final resource failure before raising.
+            # Keep the published summary, qualify it using that final status.
+        return _qualify_summary(result,ledger,interpretation)
     attempt_ids=[]; stop_reason=None
     journal=read_events(lock_path)
     try:
@@ -261,7 +285,7 @@ def _confirm(lock_path,ledger):
                             _event(lock_path,'evaluation',_journal=journal,run_id=run_id,attempt=row)
             result=_summary(lock_path,permit,run_id,interpretation,attempts,attempt_ids,stop_reason)
             ledger.finish(aid,'completed',{}, {'confirmation':protocol_lock.evidence.file_reference(result['artifact_path'])})
-            return result
+            return _qualify_summary(result,ledger,interpretation)
     except (BudgetExceeded,OSError,ValueError) as error:
         stop_reason=f'{type(error).__name__}: {error}'
         # Persist inexpensive raw partial evidence even if analysis admission fails.

@@ -308,3 +308,58 @@ def test_completed_arrays_do_not_hide_failed_final_resource_check(frozen_study,m
     assert run.confirm(lock,ledger)['status']=='analysis_pending'
     monkeypatch.setattr(ledger,'finish',finish)
     assert run.confirm(lock,ledger)['status']=='budget_exceeded'
+
+
+def test_resumed_analysis_final_resource_failure_is_durable(frozen_study,monkeypatch):
+    from signed_study import run,confirmation,stage_evidence
+    _,ledger,_,lock=frozen_study
+    def interrupted(*a,**kw): raise KeyboardInterrupt('synthetic execution interruption')
+    monkeypatch.setattr(confirmation,'fit_user',interrupted)
+    with pytest.raises(KeyboardInterrupt): run.confirm(lock,ledger)
+    original_ids=[e['ledger_attempt_id'] for e in confirmation.read_events(lock) if e['kind']=='run_started']
+    before=ledger.snapshot()['attempted_evaluations']
+    summary=confirmation._summary
+    sampler=ledger.sampler
+    def exceeds_resources(*args,**kwargs):
+        result=summary(*args,**kwargs)
+        monkeypatch.setattr(ledger,'sampler',lambda:{**sampler(),'rss_bytes':9*1024**3})
+        return result
+    monkeypatch.setattr(confirmation,'_summary',exceeds_resources)
+    first=run.confirm(lock,ledger)
+    monkeypatch.setattr(ledger,'sampler',sampler)
+    assert first['status']=='budget_exceeded'
+    assert set(first['accounting_status'])=={'failed','budget_exceeded'}
+    assert first['attempt_ids'][:len(original_ids)]==original_ids
+    assert len(first['analysis_attempt_ids'])==1
+    analysis_id=first['analysis_attempt_ids'][0]
+    assert analysis_id in first['attempt_ids']
+    assert ledger.snapshot()['attempts'][analysis_id]['status']=='budget_exceeded'
+    assert ledger.snapshot()['attempts'][analysis_id]['outputs']['confirmation']==stage_evidence.file_reference(first['artifact_path'])
+    saved=json.loads(Path(first['artifact_path']).read_text())
+    assert saved['analysis_attempt_ids']==[analysis_id]
+    second=run.confirm(lock,ledger)
+    assert second==first
+    assert ledger.snapshot()['attempted_evaluations']==before
+
+
+def test_completed_fit_interruption_has_consistent_resumed_status(frozen_study,monkeypatch):
+    from signed_study import run,confirmation,stage_evidence
+    _,ledger,_,lock=frozen_study
+    summary=confirmation._summary
+    def interrupted(*a,**kw): raise KeyboardInterrupt('after all fits, before summary')
+    monkeypatch.setattr(confirmation,'_summary',interrupted)
+    with pytest.raises(KeyboardInterrupt): run.confirm(lock,ledger)
+    monkeypatch.setattr(confirmation,'_summary',summary)
+    monkeypatch.setattr(confirmation,'fit_user',lambda *a,**kw:pytest.fail('resumed analysis refit'))
+    before=ledger.snapshot()['attempted_evaluations']
+    first=run.confirm(lock,ledger)
+    assert first['primary']['n_complete']==2
+    assert all(a['status']=='completed' for a in first['attempts'])
+    assert first['status']=='partial'
+    assert first['accounting_status']==['failed']
+    assert len(first['analysis_attempt_ids'])==1
+    analysis=ledger.snapshot()['attempts'][first['analysis_attempt_ids'][0]]
+    assert analysis['status']=='completed'
+    assert analysis['outputs']['confirmation']==stage_evidence.file_reference(first['artifact_path'])
+    assert run.confirm(lock,ledger)==first
+    assert ledger.snapshot()['attempted_evaluations']==before
