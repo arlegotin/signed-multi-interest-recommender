@@ -363,3 +363,10 @@ export hashes; the current pointer is `results/results-first-reproduction.json`.
 The original G2-only wrapper remains historical. This analysis script was added
 after all scientific stages and introduces no model work, retuning, new
 bootstrap inference or experimental-source/test change.
+
+Independent operational review approved the native result and delivery with no
+blocking findings. It independently verified all delivered CSV identities and
+values, exposure ordering, immutable evidence and both packaging generations.
+One optional validation-hardening improvement remains deferred:
+
+> Ruling: Defer optional duplicate-identity hardening in saved-evidence CSV validation — the delivered twelve comparison and thirteen metric rows are complete, unique, independently verified and hash-bound, and no script change is needed for this result — a future malformed same-length CSV could evade the local identity-coverage check on a first packaging pass, so general CSV validation is not claimed.
