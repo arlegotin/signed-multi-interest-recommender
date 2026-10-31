@@ -37,14 +37,38 @@ For ordinary development, install in a new virtual environment:
 python3.12 -m venv .venv
 . .venv/bin/activate
 python -m pip install -e '.[test]'
+python -m pip check
 python -m pytest -q
 python -m signed_study --help
+python scripts/verify_public_results.py
+git diff --check
 ```
 
 Tests use synthetic fixtures and do not acquire MovieLens or model assets.
 The help command also performs no acquisition. The current release adds
 packaging and public evidence checks; the historical study's 462-test proof
 belongs to its frozen scientific source, not the current release metadata.
+
+The directly imported `threadpoolctl` is declared explicitly. Scikit-learn 1.8+
+supports the explicit `l1_ratio=0` L2 logistic API used here; SVC probability
+estimation remains disabled. The development checks use the installed runtime
+metadata, including Torch/model-package distributions, without downloading
+weights. The read-only GitHub Actions workflow runs synthetic checks on POSIX
+Python 3.11/3.12; it does not reproduce the native Mac study. Build with
+`python -m pip install '.[build]'` and `python -m build`.
+
+Wheels support core scoring/retrieval and reports with saved configuration.
+`report_config(root, config_path=...)` accepts an explicit configuration fallback;
+without saved/explicit configuration or a checkout it raises an actionable error.
+Source-bound freeze/confirmation require a Git checkout and their own verified
+receipts. An installed wheel is not a portable execution bundle for the frozen
+experiment.
+
+For new engineering evidence, see [retrieval commands and numerical contracts](docs/research/retrieval.md),
+[publication recovery](docs/research/publication-recovery.md), and
+[residual-fiber assumptions and analytic checks](docs/research/signed-fiber-bounds.md).
+These changes invalidate the old scientific source identity intentionally. They
+do not refresh historical G1 evidence or authorize a new use of exposed users.
 
 ## Reproduce the scientific run
 
@@ -266,11 +290,11 @@ performance claims stay within those observed conditions and catalog.
 The historical G2-only `scripts/render_study_outcome.py` wrapper must not run
 against the active completed study. Read the preserved original narrative and
 exports under `results/history/2026-10-31-original-time-stop/`; its 20-file hash
-index remains unchanged. The active generic renderer conservatively flags an
-absolute/relative inspection-path mismatch. The tracked packaging script verifies
-the same file and exact hash against its completed G0 publication, resolves the
-qualification in the active report, and records it in the inventory; see the
-outcome for the specific qualification. The calibration actual-work row retains
+index remains unchanged. The original generic renderer flagged an
+absolute/relative inspection-path mismatch. The current renderer verifies the
+same resolved file, exact digest and terminal G0 owner directly. The historical
+outcome retains its original qualification; this change did not regenerate the
+native report or its receipts. The calibration actual-work row retains
 its original terminal forecast failure even though all 1056 measurements
 completed and were qualified by the new successful adoption receipt.
 

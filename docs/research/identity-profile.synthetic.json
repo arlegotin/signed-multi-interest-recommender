@@ -1,0 +1,192 @@
+{
+  "schema_version": 1,
+  "scope": "synthetic lookup, fit+score and record hashing; no study outcomes",
+  "source_commit": "55653a53b41603d98b89843057e7f52d3682d950",
+  "source_sha256": {
+    "src/signed_study/embed.py": "6bb6510c4c44acd87a34dc6610e65c2214c3203ced0d6ef21f5c77038149d62f",
+    "src/signed_study/data.py": "4ed1a4d24f0b677c717dbf29fade0867a81763091263af72454c199d00cdffa5",
+    "src/signed_study/models.py": "7bded509802357a701532389333d6aec53ef6d7cddf57e034a8c1d5ff1ad0672",
+    "scripts/profile_identity_lookup.py": "00f18b617019c563681a435c726e912247b2aa88882974b2362fb175a0468895"
+  },
+  "python": "3.12.9 (main, Feb  4 2025, 14:38:38) [Clang 16.0.0 (clang-1600.0.26.6)]",
+  "platform": "macOS-26.7.1-arm64-arm-64bit",
+  "numpy": "2.5.4",
+  "catalog": {
+    "rows": 3883,
+    "dimensions": 384,
+    "dtype": "normalized float64 from synthetic float32",
+    "seed": 1239
+  },
+  "preparation_seconds": 0.002486667,
+  "warmups": 1,
+  "repeats": 5,
+  "lookup": {
+    "before_legacy": {
+      "seconds": [
+        0.00024786042000000003,
+        0.00024932875,
+        0.00024767208999999996,
+        0.00025129042,
+        0.00024820083999999997
+      ],
+      "median_seconds": 0.00024820083999999997,
+      "traced_peak_workspace_bytes": 418040,
+      "batch": 100
+    },
+    "after_indexed": {
+      "seconds": [
+        3.30375e-06,
+        3.2254199999999998e-06,
+        3.24458e-06,
+        3.2254199999999998e-06,
+        3.2254199999999998e-06
+      ],
+      "median_seconds": 3.2254199999999998e-06,
+      "traced_peak_workspace_bytes": 52840,
+      "batch": 100
+    }
+  },
+  "fit_and_score": {
+    "before_legacy": {
+      "seconds": [
+        0.006648792,
+        0.006464333,
+        0.006343542,
+        0.00659425,
+        0.00664925
+      ],
+      "median_seconds": 0.00659425,
+      "traced_peak_workspace_bytes": 4971952,
+      "batch": 1
+    },
+    "after_indexed": {
+      "seconds": [
+        0.004424583,
+        0.00438375,
+        0.004344958,
+        0.004211625,
+        0.004150459
+      ],
+      "median_seconds": 0.004344958,
+      "traced_peak_workspace_bytes": 4972000,
+      "batch": 1
+    }
+  },
+  "hashing": [
+    {
+      "episodes": 128,
+      "ids_per_episode": 292,
+      "sha256": "6a5754328b5b8c2b6f3ae3fe6321ffa251186f2900543a4be5605e5acf6d026d",
+      "before": {
+        "seconds": [
+          0.003869584,
+          0.00381725,
+          0.003826042,
+          0.004082791,
+          0.003903167
+        ],
+        "median_seconds": 0.003869584,
+        "traced_peak_workspace_bytes": 658998,
+        "batch": 1
+      },
+      "after": {
+        "seconds": [
+          8e-08,
+          6.792e-08,
+          6.916e-08,
+          6.875e-08,
+          6.958e-08
+        ],
+        "median_seconds": 6.916e-08,
+        "traced_peak_workspace_bytes": 0,
+        "batch": 100
+      },
+      "one_time_structural_validation_seconds": 0.000816875
+    },
+    {
+      "episodes": 512,
+      "ids_per_episode": 292,
+      "sha256": "94cd916afd4897d350eba308bce09149a330d0eec0b4b70ec67211ec4b48b32c",
+      "before": {
+        "seconds": [
+          0.01655425,
+          0.016718333,
+          0.016142791,
+          0.01614225,
+          0.0162325
+        ],
+        "median_seconds": 0.0162325,
+        "traced_peak_workspace_bytes": 2638044,
+        "batch": 1
+      },
+      "after": {
+        "seconds": [
+          7.667e-08,
+          7.167e-08,
+          7.166e-08,
+          7e-08,
+          7.082999999999999e-08
+        ],
+        "median_seconds": 7.166e-08,
+        "traced_peak_workspace_bytes": 0,
+        "batch": 100
+      },
+      "one_time_structural_validation_seconds": 0.00316575
+    },
+    {
+      "episodes": 2194,
+      "ids_per_episode": 292,
+      "sha256": "6b7b26105acd2e2896c5f3cad0121ce720724dadfc03a1555793dea27e42c814",
+      "before": {
+        "seconds": [
+          0.067089584,
+          0.0692455,
+          0.067508291,
+          0.067136625,
+          0.067978375
+        ],
+        "median_seconds": 0.067508291,
+        "traced_peak_workspace_bytes": 11422616,
+        "batch": 1
+      },
+      "after": {
+        "seconds": [
+          7.5e-08,
+          8.708000000000001e-08,
+          8.542e-08,
+          6.875e-08,
+          6.708e-08
+        ],
+        "median_seconds": 7.5e-08,
+        "traced_peak_workspace_bytes": 0,
+        "batch": 100
+      },
+      "one_time_structural_validation_seconds": 0.013419709
+    }
+  ],
+  "threadpools": [
+    {
+      "user_api": "openmp",
+      "internal_api": "openmp",
+      "num_threads": 1,
+      "prefix": "libomp",
+      "filepath": "/Users/artemlegotin/Documents/git_alter/signed-multi-interest-recommender/.venv/lib/python3.12/site-packages/sklearn/.dylibs/libomp.dylib",
+      "version": null
+    }
+  ],
+  "lookup_operations": {
+    "requests": 20,
+    "catalog_entries_before": 77660,
+    "catalog_entries_after_one_time": 3883,
+    "catalog_entries_after_per_request": 0,
+    "requested_ids_per_call": 16
+  },
+  "memory": {
+    "vectors_bytes": 11928576,
+    "ids_bytes": 31064,
+    "index_python_shallow_bytes": 147544,
+    "index_python_entries_bytes": 217448,
+    "note": "tracemalloc peaks are traced allocations in a separate call, not total RSS"
+  },
+  "source_unchanged": true
+}

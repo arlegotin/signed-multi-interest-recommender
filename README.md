@@ -54,6 +54,12 @@ regeneration and a fresh study. [The blueprint](docs/blueprint.md) records the
 research question and protocol. MovieLens data and model weights are acquired
 separately; neither is included in the release.
 
+Optional [bounded Gram retrieval](docs/research/retrieval.md) accelerates repeated
+catalog scoring in some reuse regimes. Strict top-k retains the canonical scorer;
+explicit fast mode ranks its own float64 scores and can disagree at ties. This
+engineering extension does not change the completed accuracy result. Its offline
+synthetic benchmark requires no dataset or encoder downloads.
+
 ## Credit and license
 
 By Artem Legotin. Cite [CITATION.cff](CITATION.cff) and the commit you use.

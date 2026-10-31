@@ -1,0 +1,303 @@
+{
+  "boundary": "in-memory preparation plus forecasting under tracemalloc; no fit, score, filesystem or ledger work",
+  "python": "3.12.9",
+  "results": [
+    {
+      "entries": 3,
+      "episodes": 16,
+      "observations": [
+        {
+          "fit_bin_row_visits": 2304,
+          "forecast_seconds": 0.03803428571428572,
+          "method": "legacy",
+          "peak_tracemalloc_bytes": 2160,
+          "preparation_seconds": null,
+          "repeat": 0,
+          "total_seconds": 0.003015833
+        },
+        {
+          "fit_bin_row_visits": 144,
+          "forecast_seconds": 0.03803428571428572,
+          "method": "prepared",
+          "peak_tracemalloc_bytes": 189136,
+          "preparation_seconds": 0.003649375,
+          "repeat": 0,
+          "total_seconds": 0.003859833
+        },
+        {
+          "fit_bin_row_visits": 144,
+          "forecast_seconds": 0.03803428571428572,
+          "method": "prepared",
+          "peak_tracemalloc_bytes": 182136,
+          "preparation_seconds": 0.003493333,
+          "repeat": 1,
+          "total_seconds": 0.003695208
+        },
+        {
+          "fit_bin_row_visits": 2304,
+          "forecast_seconds": 0.03803428571428572,
+          "method": "legacy",
+          "peak_tracemalloc_bytes": 1776,
+          "preparation_seconds": null,
+          "repeat": 1,
+          "total_seconds": 0.002569125
+        },
+        {
+          "fit_bin_row_visits": 2304,
+          "forecast_seconds": 0.03803428571428572,
+          "method": "legacy",
+          "peak_tracemalloc_bytes": 1776,
+          "preparation_seconds": null,
+          "repeat": 2,
+          "total_seconds": 0.0025385
+        },
+        {
+          "fit_bin_row_visits": 144,
+          "forecast_seconds": 0.03803428571428572,
+          "method": "prepared",
+          "peak_tracemalloc_bytes": 180208,
+          "preparation_seconds": 0.003332875,
+          "repeat": 2,
+          "total_seconds": 0.003540125
+        },
+        {
+          "fit_bin_row_visits": 144,
+          "forecast_seconds": 0.03803428571428572,
+          "method": "prepared",
+          "peak_tracemalloc_bytes": 180200,
+          "preparation_seconds": 0.003441875,
+          "repeat": 3,
+          "total_seconds": 0.003650125
+        },
+        {
+          "fit_bin_row_visits": 2304,
+          "forecast_seconds": 0.03803428571428572,
+          "method": "legacy",
+          "peak_tracemalloc_bytes": 1776,
+          "preparation_seconds": null,
+          "repeat": 3,
+          "total_seconds": 0.002625042
+        },
+        {
+          "fit_bin_row_visits": 2304,
+          "forecast_seconds": 0.03803428571428572,
+          "method": "legacy",
+          "peak_tracemalloc_bytes": 1776,
+          "preparation_seconds": null,
+          "repeat": 4,
+          "total_seconds": 0.002606709
+        },
+        {
+          "fit_bin_row_visits": 144,
+          "forecast_seconds": 0.03803428571428572,
+          "method": "prepared",
+          "peak_tracemalloc_bytes": 180192,
+          "preparation_seconds": 0.003447375,
+          "repeat": 4,
+          "total_seconds": 0.0036475
+        }
+      ],
+      "timing_rows": 336
+    },
+    {
+      "entries": 3,
+      "episodes": 32,
+      "observations": [
+        {
+          "fit_bin_row_visits": 9216,
+          "forecast_seconds": 0.07994142857142855,
+          "method": "legacy",
+          "peak_tracemalloc_bytes": 2912,
+          "preparation_seconds": null,
+          "repeat": 0,
+          "total_seconds": 0.010634333
+        },
+        {
+          "fit_bin_row_visits": 288,
+          "forecast_seconds": 0.07994142857142855,
+          "method": "prepared",
+          "peak_tracemalloc_bytes": 367048,
+          "preparation_seconds": 0.00682525,
+          "repeat": 0,
+          "total_seconds": 0.007241208
+        },
+        {
+          "fit_bin_row_visits": 288,
+          "forecast_seconds": 0.07994142857142855,
+          "method": "prepared",
+          "peak_tracemalloc_bytes": 366992,
+          "preparation_seconds": 0.006793,
+          "repeat": 1,
+          "total_seconds": 0.007191541
+        },
+        {
+          "fit_bin_row_visits": 9216,
+          "forecast_seconds": 0.07994142857142855,
+          "method": "legacy",
+          "peak_tracemalloc_bytes": 2792,
+          "preparation_seconds": null,
+          "repeat": 1,
+          "total_seconds": 0.009470541
+        },
+        {
+          "fit_bin_row_visits": 9216,
+          "forecast_seconds": 0.07994142857142855,
+          "method": "legacy",
+          "peak_tracemalloc_bytes": 2792,
+          "preparation_seconds": null,
+          "repeat": 2,
+          "total_seconds": 0.009536542
+        },
+        {
+          "fit_bin_row_visits": 288,
+          "forecast_seconds": 0.07994142857142855,
+          "method": "prepared",
+          "peak_tracemalloc_bytes": 366928,
+          "preparation_seconds": 0.006745625,
+          "repeat": 2,
+          "total_seconds": 0.0071605
+        },
+        {
+          "fit_bin_row_visits": 288,
+          "forecast_seconds": 0.07994142857142855,
+          "method": "prepared",
+          "peak_tracemalloc_bytes": 366912,
+          "preparation_seconds": 0.006834667,
+          "repeat": 3,
+          "total_seconds": 0.007247625
+        },
+        {
+          "fit_bin_row_visits": 9216,
+          "forecast_seconds": 0.07994142857142855,
+          "method": "legacy",
+          "peak_tracemalloc_bytes": 2792,
+          "preparation_seconds": null,
+          "repeat": 3,
+          "total_seconds": 0.009565625
+        },
+        {
+          "fit_bin_row_visits": 9216,
+          "forecast_seconds": 0.07994142857142855,
+          "method": "legacy",
+          "peak_tracemalloc_bytes": 2792,
+          "preparation_seconds": null,
+          "repeat": 4,
+          "total_seconds": 0.009472417
+        },
+        {
+          "fit_bin_row_visits": 288,
+          "forecast_seconds": 0.07994142857142855,
+          "method": "prepared",
+          "peak_tracemalloc_bytes": 366904,
+          "preparation_seconds": 0.006787959,
+          "repeat": 4,
+          "total_seconds": 0.007187542
+        }
+      ],
+      "timing_rows": 672
+    },
+    {
+      "entries": 3,
+      "episodes": 64,
+      "observations": [
+        {
+          "fit_bin_row_visits": 36864,
+          "forecast_seconds": 0.18636095238095246,
+          "method": "legacy",
+          "peak_tracemalloc_bytes": 3648,
+          "preparation_seconds": null,
+          "repeat": 0,
+          "total_seconds": 0.041270708
+        },
+        {
+          "fit_bin_row_visits": 576,
+          "forecast_seconds": 0.18636095238095246,
+          "method": "prepared",
+          "peak_tracemalloc_bytes": 742888,
+          "preparation_seconds": 0.0141105,
+          "repeat": 0,
+          "total_seconds": 0.01493975
+        },
+        {
+          "fit_bin_row_visits": 576,
+          "forecast_seconds": 0.18636095238095246,
+          "method": "prepared",
+          "peak_tracemalloc_bytes": 742880,
+          "preparation_seconds": 0.014004583,
+          "repeat": 1,
+          "total_seconds": 0.014835959
+        },
+        {
+          "fit_bin_row_visits": 36864,
+          "forecast_seconds": 0.18636095238095246,
+          "method": "legacy",
+          "peak_tracemalloc_bytes": 3528,
+          "preparation_seconds": null,
+          "repeat": 1,
+          "total_seconds": 0.037317541
+        },
+        {
+          "fit_bin_row_visits": 36864,
+          "forecast_seconds": 0.18636095238095246,
+          "method": "legacy",
+          "peak_tracemalloc_bytes": 3528,
+          "preparation_seconds": null,
+          "repeat": 2,
+          "total_seconds": 0.036895458
+        },
+        {
+          "fit_bin_row_visits": 576,
+          "forecast_seconds": 0.18636095238095246,
+          "method": "prepared",
+          "peak_tracemalloc_bytes": 742872,
+          "preparation_seconds": 0.013883792,
+          "repeat": 2,
+          "total_seconds": 0.014694042
+        },
+        {
+          "fit_bin_row_visits": 576,
+          "forecast_seconds": 0.18636095238095246,
+          "method": "prepared",
+          "peak_tracemalloc_bytes": 742864,
+          "preparation_seconds": 0.013947042,
+          "repeat": 3,
+          "total_seconds": 0.014788791
+        },
+        {
+          "fit_bin_row_visits": 36864,
+          "forecast_seconds": 0.18636095238095246,
+          "method": "legacy",
+          "peak_tracemalloc_bytes": 3528,
+          "preparation_seconds": null,
+          "repeat": 3,
+          "total_seconds": 0.037535125
+        },
+        {
+          "fit_bin_row_visits": 36864,
+          "forecast_seconds": 0.18636095238095246,
+          "method": "legacy",
+          "peak_tracemalloc_bytes": 3528,
+          "preparation_seconds": null,
+          "repeat": 4,
+          "total_seconds": 0.03677175
+        },
+        {
+          "fit_bin_row_visits": 576,
+          "forecast_seconds": 0.18636095238095246,
+          "method": "prepared",
+          "peak_tracemalloc_bytes": 742856,
+          "preparation_seconds": 0.0141555,
+          "repeat": 4,
+          "total_seconds": 0.014972125
+        }
+      ],
+      "timing_rows": 1344
+    }
+  ],
+  "schema_version": 1,
+  "source_sha256": {
+    "/Users/artemlegotin/Documents/git_alter/signed-multi-interest-recommender/scripts/profile_forecast_costs.py": "6bd37e7501c55d9e8aadf64410da0b7051a1cd68c11ad0b82790cac08a1a682f",
+    "src/signed_study/calibration.py": "a0e1ee0b891cca603c8ae9d9bdfa970f5f2f8c89e9555030cc859427a2c1cbaa",
+    "src/signed_study/costs.py": "4b1ada96687c90b77dadec0085296172e86b177e5e2110f3159acedfc7dfcca0"
+  }
+}
