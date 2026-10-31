@@ -218,3 +218,57 @@ def test_diagnostic_final_resource_failure_qualifies_saved_artifact(frozen_study
     second=run.diagnose(lock,ledger)
     assert second['status']==result['status'] and second['accounting_status']==result['accounting_status']
     assert second['original_output_sha256']==result['original_output_sha256']
+
+
+def test_saved_diagnostics_bind_ledger_and_corrected_confirmation_identity(frozen_study,monkeypatch):
+    import json
+    from pathlib import Path
+    from signed_study import run,diagnostics,confirmation,protocol_lock,protocol,stage_evidence
+    config,ledger,_,lock=frozen_study
+    original=run.confirm(lock,ledger)
+    monkeypatch.setattr(diagnostics,'contamination_applicable',lambda *a:False)
+    diagnostic=run.diagnose(lock,ledger)
+    path=Path(diagnostic['artifact_path']); original_bytes=path.read_bytes()
+    changed=json.loads(original_bytes)
+    changed['status']='forged_but_self_checksummed'
+    changed.pop('output_sha256')
+    changed['output_sha256']=protocol.canonical_sha256(changed)
+    path.write_bytes(protocol_lock.canonical_bytes(changed))
+    with pytest.raises(protocol.ProtocolMismatch,match='diagnostic|Diagnostic'):
+        run.diagnose(lock,ledger)
+    path.write_bytes(original_bytes)
+    source=protocol_lock.source_identity()
+    monkeypatch.setattr(protocol_lock,'source_identity',lambda:{**source,'commit':'d'*40,'tree':'e'*40,'content':{'fixed.py':'f'*64}})
+    old=stage_evidence.code_identity()
+    monkeypatch.setattr(stage_evidence,'code_identity',lambda:{**old,'fixed.py':'f'*64})
+    assert stage_evidence.record_correctness(config,ledger)['status']=='completed'
+    confirmation.record_implementation_correction(lock,ledger,'Synthetic implementation correction; frozen scientific inputs')
+    corrected=run.confirm(lock,ledger)
+    assert corrected['run_id']!=original['run_id']
+    target=path.with_name(f"diagnostics-{corrected['run_id']}.json")
+    target.write_bytes(original_bytes)
+    with pytest.raises(protocol.ProtocolMismatch,match='diagnostic|Diagnostic'):
+        run.diagnose(lock,ledger)
+    # The original artifact remains externally ledger-bound and valid. Its
+    # scientific inputs still cannot be attributed to the current corrected run.
+    target.unlink()
+    digest,payload=protocol_lock.read_lock(lock)
+    expected=diagnostics._diagnostic_inputs(digest,payload,corrected,confirmation.read_events(lock))
+    with pytest.raises(protocol.ProtocolMismatch,match='identity|inputs|Identity'):
+        diagnostics._load_saved_diagnostics(path,ledger,expected)
+
+
+def test_saved_diagnostics_allow_same_run_confirmation_qualification_changes(frozen_study,monkeypatch):
+    from signed_study import run,diagnostics,confirmation
+    _,ledger,_,lock=frozen_study
+    original=run.confirm(lock,ledger)
+    monkeypatch.setattr(diagnostics,'contamination_applicable',lambda *a:False)
+    first=run.diagnose(lock,ledger)
+    confirmation._invalidate(lock,'Synthetic late interpretation qualification')
+    qualified=confirmation.load_saved_confirmation(lock,ledger)
+    assert qualified['output_sha256']!=original['output_sha256']
+    second=run.diagnose(lock,ledger)
+    assert second['confirmation_interpretation']=='invalid_confirmatory'
+    assert second['numerical']==first['numerical'] and second['timing']==first['timing']
+    assert second['confirmation_run_id']==original['run_id']
+    assert second['confirmation_artifact']==first['confirmation_artifact']

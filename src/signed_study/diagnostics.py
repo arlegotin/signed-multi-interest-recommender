@@ -277,6 +277,51 @@ def contamination_measurements(plan, episodes, cache, config, permit, store, led
                 interpretation='secondary stress diagnostic; original hyperparameters and evaluation labels; no retuning')
 
 
+def _diagnostic_inputs(lock_hash,payload,saved,events):
+    """Stable scientific identity, independent of current qualification hashes."""
+    finished=[e for e in events if e['kind']=='run_finished' and e['run_id']==saved['run_id']]
+    if len(finished)!=1 or finished[0]['lock_sha256']!=lock_hash:
+        raise ProtocolMismatch('Diagnostic confirmation identity lacks a unique frozen run artifact')
+    reference=finished[0]['artifact']
+    if Path(reference['path'])!=Path(saved['artifact_path']):
+        raise ProtocolMismatch('Diagnostic confirmation artifact identity changed')
+    return dict(lock_sha256=lock_hash,confirmation_run_id=saved['run_id'],confirmation_artifact=reference,
+                confirmation_record_sha256=saved.get('original_output_sha256',saved['output_sha256']),
+                frozen_development_sha256=canonical_sha256(payload['development']),
+                config_sha256=canonical_sha256(payload['config']),
+                cache_sha256=payload['identities']['cache_sha256'],
+                episodes_sha256=payload['data_access']['episodes_sha256'])
+
+
+def _load_saved_diagnostics(path,ledger,expected_inputs):
+    """Require external publication binding and exact run inputs before qualification.
+
+    A terminal resource failure may still have published immutable evidence; its
+    noncompleted ledger status is qualified by the caller after identity checks.
+    """
+    try:
+        result=json.loads(Path(path).read_text()); verify_record(result)
+        actual=file_reference(path)
+        accounting=ledger.snapshot()['attempts']
+        anchors=[accounting[aid] for aid in result['attempt_ids'] if aid in accounting
+                 and accounting[aid]['stage']=='G5' and accounting[aid]['event']=='finish'
+                 and accounting[aid].get('outputs',{}).get('diagnostics')==actual]
+        if len(anchors)!=1:
+            raise ProtocolMismatch('Diagnostic artifact differs from its permanent ledger publication')
+        if (Path(result['artifact_path'])!=Path(path)
+                or result['lock_sha256']!=expected_inputs['lock_sha256']
+                or result['confirmation_run_id']!=expected_inputs['confirmation_run_id']
+                or result['confirmation_artifact']!=expected_inputs['confirmation_artifact']
+                or result['inputs']!=expected_inputs
+                or result['input_sha256']!=canonical_sha256(expected_inputs)):
+            raise ProtocolMismatch('Diagnostic identity or frozen inputs belong to another confirmation run')
+        protocol_lock.evidence.verify_reference(result['confirmation_artifact'])
+        protocol_lock.evidence.verify_reference(result['attempt_journal'])
+        return result
+    except (ValueError,KeyError,OSError,TypeError) as error:
+        raise ProtocolMismatch(f'Diagnostic provenance verification failed: {error}') from error
+
+
 def _qualify(result,ledger,saved,verification_id=None):
     original=result
     result=dict(result)
@@ -308,9 +353,10 @@ def _diagnose(lock_path,ledger):
         authorization=next((e for e in reversed(events) if e['kind']=='correction_authorized'),None)
         permit=(confirmation._verify_correction(lock_path,live,authorization) if authorization else protocol_lock.verify_protocol(lock_path,live))
         saved=confirmation.load_saved_confirmation(lock_path,ledger,permit=permit)
+        inputs=_diagnostic_inputs(digest,payload,saved,events)
     path=Path(lock_path).with_name(f"diagnostics-{saved['run_id']}.json")
     if path.exists():
-        result=json.loads(path.read_text()); verify_record(result)
+        result=_load_saved_diagnostics(path,ledger,inputs)
         return _qualify(result,ledger,saved,verification_id)
     journal=path.with_suffix('.jsonl')
     if journal.exists(): raise ProtocolMismatch('Interrupted diagnostics retained; no automatic repeat')
@@ -323,6 +369,8 @@ def _diagnose(lock_path,ledger):
             handle.write(protocol_lock.canonical_bytes(event).decode()+'\n'); handle.flush(); os.fsync(handle.fileno())
     episodes={e.history.user_id:e for e in store.confirmation}
     result=dict(schema_version=1,lock_sha256=digest,confirmation_sha256=saved['output_sha256'],confirmation_status=saved['status'],
+                confirmation_run_id=saved['run_id'],confirmation_artifact=inputs['confirmation_artifact'],
+                inputs=inputs,input_sha256=canonical_sha256(inputs),
                 confirmation_interpretation=saved['interpretation'],interpretation='secondary_unadjusted',status='completed',attempt_ids=attempts,artifact_path=str(path))
     with ledger.work('G5',forecast['seconds']['G5'],forecast['evaluations']['G5']) as aid:
         attempts.append(aid); record(dict(kind='started',ledger_attempt_id=aid))
