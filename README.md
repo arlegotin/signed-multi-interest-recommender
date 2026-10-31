@@ -1,23 +1,28 @@
-# Signed multi-interest recommender
+# Signed multi-interest recommendation
 
-**A Python research toolkit for recommending movies from likes and dislikes.**
+**A recommendation approach that keeps multiple interests and uses explicit dislikes.**
 
-It turns movie titles and genres into embeddings, builds user profiles from past
-ratings, and scores candidate movies. Use it to prototype a recommender, compare
-ways of using negative feedback, or reproduce a complete MovieLens 1M experiment.
+People can have several unrelated interests. **SignedMax** keeps those interests
+separate, scores a candidate by its strongest match to any of them, and subtracts
+a penalty for resembling something the user disliked.
 
-The main model, **SignedMax**, keeps several interests per user. It scores each
-movie by its best match to those interests, minus a penalty for resembling a movie
-the user disliked.
+The method works on normalized item embeddings. This repository provides the
+Python implementation and the experiments to test the idea against established
+baselines. **MovieLens 1M is the included benchmark.**
 
-## What you can use
+## The idea
 
-- **Ranking models:** SignedMax, logistic regression, SVM and geometric baselines,
-  with Python functions for fitting user histories and scoring your own embeddings.
-- **An evaluation pipeline:** chronological splits, separate development and
-  confirmation users, fixed model selection and paired statistical comparisons.
-- **An auditable workflow:** saved aggregate results, durable records of failed
-  and interrupted work, and a verifier that needs no dataset download.
+```text
+score = strongest positive-interest match − λ × strongest negative-example match
+```
+
+Positive examples are grouped into several interest prototypes. Negative examples
+stay as individual vectors. Matches use cosine similarity; λ controls the penalty.
+
+Use the code to try the rule on your own embeddings and positive/negative
+histories, compare it with logistic regression, SVM and geometric baselines, or
+inspect the completed experiment. Model selection uses development users; frozen
+methods are then evaluated on separate confirmation users.
 
 ## Try the scoring rule
 
@@ -30,29 +35,29 @@ python -m pip install -e .
 ```
 
 This tiny example uses synthetic unit vectors: two different interests and one
-disliked movie.
+negative example.
 
 ```python
 import numpy as np
 from signed_study.models import signed_scores
 
-movies = np.eye(3, dtype=np.float64)
-interests = movies[:2]
-dislikes = movies[2:]
+items = np.eye(3, dtype=np.float64)
+interests = items[:2]
+dislikes = items[2:]
 
-scores = signed_scores(movies, interests, dislikes, penalty=1.0)
+scores = signed_scores(items, interests, dislikes, penalty=1.0)
 print(scores.tolist())  # [1.0, 1.0, -1.0]
 ```
 
-Both interests get a match. The disliked example gets penalized.
-[Full setup, tests and study reproduction](REPRODUCE.md). Real movie runs acquire
-MovieLens data and encoder weights separately.
+Both interests get a match. The negative example gets penalized.
+[Setup, tests and benchmark reproduction](REPRODUCE.md). The MovieLens benchmark
+acquires its dataset and encoder weights separately.
 
-For repeated catalog queries, an optional cache reuses movie similarities. Strict
+For repeated catalog queries, an optional cache reuses item similarities. Strict
 mode preserves the original rankings; opt-in fast mode can reorder near ties.
 [Benchmarks, memory costs and API](docs/research/retrieval.md).
 
-## What the study found
+## What the experiment found
 
 **Logistic regression beat SignedMax.** The MovieLens 1M experiment compared
 **83 configurations on development users**, then evaluated **13 frozen methods
@@ -64,8 +69,8 @@ on all 1,776 confirmation users**.
 | Logistic regression | **0.6046** |
 
 SignedMax minus logistic was **−0.0275 AUC**, with a paired 95% interval of
-**[−0.0326, −0.0223]**. The repository keeps that result alongside the reusable
-code. [Full findings and limitations](docs/study-outcome.md).
+**[−0.0326, −0.0223]**. This evaluation doesn't establish a recommendation-quality
+gain for the proposed approach. [Full findings and limitations](docs/study-outcome.md).
 
 ![Confirmation accuracy and recorded CPU costs](docs/figures/accuracy-cost.png)
 
