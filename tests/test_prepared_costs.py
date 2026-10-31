@@ -116,14 +116,21 @@ def test_missing_timing_evidence_never_becomes_zero_cost(damage):
 def test_whole_forecast_matches_original_outputs_at_float_budget_boundaries(local_config):
     """Golden digests came from the untouched inspected revision, not new helpers."""
     import json
+    import sys
     from pathlib import Path
     from types import SimpleNamespace
     from test_calibration import measured, cohort
     from signed_study.calibration import forecast_scale
     from signed_study.protocol import canonical_sha256
-    fixture=json.loads((Path(__file__).parent/'fixtures/forecast-boundaries.json').read_text())
+    name = ('forecast-boundaries.python3.11.json' if sys.version_info[:2] == (3,11)
+            else 'forecast-boundaries.json')
+    fixture=json.loads((Path(__file__).parent/'fixtures'/name).read_text())
     assert canonical_sha256(measured())==fixture['measurement_sha256']
     for case in fixture['cases']:
         ledger=SimpleNamespace(config=local_config,snapshot=lambda:case['state'])
         actual=forecast_scale(measured(),cohort(),ledger)
         assert canonical_sha256(actual)==case['forecast_sha256'],case['name']
+        if case['name'] == 'G3_below':
+            assert actual['scale'] == [256,1776]
+        elif case['name'] in ('G3_at','G3_above'):
+            assert actual['scale'] == [418,1776]

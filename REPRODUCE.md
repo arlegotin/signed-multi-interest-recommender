@@ -56,6 +56,13 @@ The help command also performs no acquisition. The current release adds
 packaging and public evidence checks; the historical study's 462-test proof
 belongs to its frozen scientific source, not the current release metadata.
 
+Forecast regression fixtures preserve separate Python 3.11/3.12 outputs from
+the inspected source: builtin floating-point summation changed between them.
+Run `PYTHONPATH=src:tests python tests/fixtures/generate_forecast_boundaries.py`
+to verify exact old/new equality on the selected runtime. Development tests
+that prescribe tied scores use singleton chunks so BLAS reduction tails cannot
+break that synthetic assumption; ordinary chunked scoring is tested separately.
+
 The directly imported `threadpoolctl` is declared explicitly. Scikit-learn 1.8+
 supports the explicit `l1_ratio=0` L2 logistic API used here; SVC probability
 estimation remains disabled. The development checks use the installed runtime

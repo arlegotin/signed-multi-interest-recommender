@@ -1,5 +1,6 @@
 """Fixed-cohort tuning with actual synthetic model fits and durable evidence."""
 import json
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -18,10 +19,23 @@ def context(pipeline):
     return config,ledger,store,cache,calibration
 
 
+def tied_context(pipeline):
+    """Give identical synthetic candidates identical reference call shapes.
+
+    These tests prescribe tied AUCs to exercise all eleven endpoint requests.
+    Matrix/vector reduction tails can distinguish identical rows on some BLAS
+    builds. Singleton scoring preserves this fixture's intended exact ties;
+    the other integration tests retain the ordinary scoring chunk.
+    """
+    config,ledger,store,cache,calibration = context(pipeline)
+    config = replace(config,numerics={**config.numerics,'score_chunk_size':1})
+    return config,ledger,store,cache,calibration
+
+
 def test_development_real_fits_complete_selection_and_firewall(pipeline,monkeypatch):
     from signed_study import run, development, data, workload
     assert hasattr(development,'execute_development'), 'development execution missing'
-    config,ledger,store,cache,calibration = context(pipeline)
+    config,ledger,store,cache,calibration = tied_context(pipeline)
     users = [e.history.user_id for e in store.development[:2]]
     calibration['forecast']['planned_user_ids']['development'] = users
     calls=[]
@@ -31,6 +45,7 @@ def test_development_real_fits_complete_selection_and_firewall(pipeline,monkeypa
     result=development.execute_development(config,ledger,store,cache,calibration)
     assert result['status']=='completed',result
     assert result['actual_evaluations'] == 2*(78+11+11)  # initial, outcome-free pilot, expansion
+    assert all(len(set(a['scores'])) == 1 for a in result['attempts'])
     assert calls == users+users
     assert len(result['families']) == 10
     assert result['B_star']['family'] == 'AllExemplarMargin'
@@ -94,7 +109,7 @@ def test_declared_aliases_still_charge_and_journal(pipeline):
 def test_complete_expansion_denial_keeps_all_pilot_entries_ineligible(pipeline,monkeypatch):
     from signed_study import development
     from signed_study.budget import BudgetExceeded
-    config,ledger,store,cache,calibration=context(pipeline)
+    config,ledger,store,cache,calibration=tied_context(pipeline)
     users=[e.history.user_id for e in store.development[:2]]
     calibration['forecast']['planned_user_ids']['development']=users
     original=ledger.admit
@@ -178,7 +193,7 @@ def test_real_variable_scores_choose_macro_auc_winners(pipeline):
 def test_endpoint_profile_failure_cannot_create_partial_tuning(pipeline,monkeypatch):
     from signed_study import development,workload
     from signed_study.models import UserModel
-    config,ledger,store,cache,calibration=context(pipeline)
+    config,ledger,store,cache,calibration=tied_context(pipeline)
     calibration['forecast']['planned_user_ids']['development']=[1,2]
     original=workload.fit_user
     def fit(method,history,embeddings,parameters,**kw):

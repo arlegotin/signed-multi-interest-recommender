@@ -31,7 +31,32 @@ jobs:
           python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
           python -m pip install -e '.[test,build]'
       - run: python -m pip check
-      - run: python -m pytest -q
+      - name: Record numerical runtime and synthetic tie behavior
+        run: |
+          python - <<'PY'
+          from importlib.metadata import version
+          import numpy as np
+          from threadpoolctl import threadpool_info
+          from signed_study.data import History
+          from signed_study.models import fit_user, score_user
+          print({name: version(name) for name in ('numpy', 'scipy', 'scikit-learn')})
+          print(threadpool_info())
+          class IdenticalRows:
+              def rows(self, ids):
+                  rows = np.zeros((len(ids), 384))
+                  rows[:, 0] = 1
+                  return rows
+          for positive, negative, candidates in ((10, 5, 10), (11, 6, 11)):
+              history = History(1, 100, 'development', tuple(range(positive)),
+                                tuple(range(100, 100 + negative)))
+              for C in (.01, .1, 1, 10, 100):
+                  model = fit_user('RBFSVM', history, IdenticalRows(), {'C': C, 'g': 1})
+                  scores = {chunk: score_user(model, range(200, 200 + candidates),
+                            IdenticalRows(), chunk_size=chunk).tolist() for chunk in (1, 512)}
+                  print({'supports': [positive, negative], 'C': C, 'scores': scores})
+                  assert len(set(scores[1])) == 1
+          PY
+      - run: python -m pytest -q --durations=10
       - run: python scripts/verify_public_results.py
       - run: python -m signed_study --help
       - name: Check lazy CLI imports

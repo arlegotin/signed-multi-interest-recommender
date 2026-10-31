@@ -1,0 +1,180 @@
+{
+  "baseline_commit": "55653a53b41603d98b89843057e7f52d3682d950",
+  "baseline_source_sha256": "29b59a0f61e100dd1808483bcef54f8f5615131a37c85f89c500009a4c1d3656",
+  "cases": [
+    {
+      "forecast_sha256": "9339c18ab8f9829737db1c7718eece2908460c287290442cd75a2ea0d3fda1de",
+      "name": "normal",
+      "scale": [
+        418,
+        1776
+      ],
+      "state": {
+        "attempted_evaluations": 0,
+        "experimental_seconds": 0.0,
+        "stage_seconds": {
+          "G0": 0.0,
+          "G1": 0.0,
+          "G2": 0.0,
+          "G3": 0.0,
+          "G4": 0.0,
+          "G5": 0.0,
+          "G6": 0.0,
+          "repair": 0.0
+        }
+      },
+      "status": "feasible"
+    },
+    {
+      "forecast_sha256": "81a3e7308ffe5c59a3ca386fd05a0060a0706f91334d14c549c95ce53b499bdc",
+      "name": "reservations",
+      "scale": [
+        256,
+        1500
+      ],
+      "state": {
+        "attempted_evaluations": 53000,
+        "experimental_seconds": 0.0,
+        "stage_seconds": {
+          "G0": 0.0,
+          "G1": 0.0,
+          "G2": 0.0,
+          "G3": 0.0,
+          "G4": 0.0,
+          "G5": 0.0,
+          "G6": 0.0,
+          "repair": 0.0
+        }
+      },
+      "status": "feasible"
+    },
+    {
+      "forecast_sha256": "3da530b57d40f68d934b7cc3254af1712630477da9073061059c0e7b0d9e4ae0",
+      "name": "G3_below",
+      "scale": [
+        256,
+        1776
+      ],
+      "state": {
+        "attempted_evaluations": 0,
+        "experimental_seconds": 0.0,
+        "stage_limits": {
+          "G0": 600,
+          "G1": 600,
+          "G2": 1200,
+          "G3": 25.916004833333314,
+          "G4": 4800,
+          "G5": 1200,
+          "G6": 1800,
+          "repair": 1200
+        },
+        "stage_seconds": {
+          "G0": 0.0,
+          "G1": 0.0,
+          "G2": 0.0,
+          "G3": 0.0,
+          "G4": 0.0,
+          "G5": 0.0,
+          "G6": 0.0,
+          "repair": 0.0
+        }
+      },
+      "status": "feasible"
+    },
+    {
+      "forecast_sha256": "9339c18ab8f9829737db1c7718eece2908460c287290442cd75a2ea0d3fda1de",
+      "name": "G3_at",
+      "scale": [
+        418,
+        1776
+      ],
+      "state": {
+        "attempted_evaluations": 0,
+        "experimental_seconds": 0.0,
+        "stage_limits": {
+          "G0": 600,
+          "G1": 600,
+          "G2": 1200,
+          "G3": 25.916004833333318,
+          "G4": 4800,
+          "G5": 1200,
+          "G6": 1800,
+          "repair": 1200
+        },
+        "stage_seconds": {
+          "G0": 0.0,
+          "G1": 0.0,
+          "G2": 0.0,
+          "G3": 0.0,
+          "G4": 0.0,
+          "G5": 0.0,
+          "G6": 0.0,
+          "repair": 0.0
+        }
+      },
+      "status": "feasible"
+    },
+    {
+      "forecast_sha256": "9339c18ab8f9829737db1c7718eece2908460c287290442cd75a2ea0d3fda1de",
+      "name": "G3_above",
+      "scale": [
+        418,
+        1776
+      ],
+      "state": {
+        "attempted_evaluations": 0,
+        "experimental_seconds": 0.0,
+        "stage_limits": {
+          "G0": 600,
+          "G1": 600,
+          "G2": 1200,
+          "G3": 25.91600483333332,
+          "G4": 4800,
+          "G5": 1200,
+          "G6": 1800,
+          "repair": 1200
+        },
+        "stage_seconds": {
+          "G0": 0.0,
+          "G1": 0.0,
+          "G2": 0.0,
+          "G3": 0.0,
+          "G4": 0.0,
+          "G5": 0.0,
+          "G6": 0.0,
+          "repair": 0.0
+        }
+      },
+      "status": "feasible"
+    },
+    {
+      "forecast_sha256": "f64c3d787ff4c6851d47c1cfa2b6f3dfdcd058c7665cfdff071e6c89245f7cde",
+      "name": "results_first",
+      "scale": [
+        418,
+        1776
+      ],
+      "state": {
+        "attempted_evaluations": 0,
+        "execution_policy": {
+          "mode": "results_first"
+        },
+        "experimental_seconds": 20000.0,
+        "stage_seconds": {
+          "G0": 0.0,
+          "G1": 0.0,
+          "G2": 0.0,
+          "G3": 0.0,
+          "G4": 0.0,
+          "G5": 0.0,
+          "G6": 0.0,
+          "repair": 0.0
+        }
+      },
+      "status": "feasible"
+    }
+  ],
+  "measurement_sha256": "5505b8cf035b511c665c240900a903ae44900dd8bc69ce93c6da8486ecc11599",
+  "python": "3.11",
+  "schema_version": 1
+}
