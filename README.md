@@ -18,8 +18,10 @@ python -m signed_study --help
 Help loads no encoder or outcomes. Keep caches under `.cache/`, including a local
 Hugging Face cache (`HF_HOME="$PWD/.cache/huggingface"`). Acquisition validates the
 fixed model's immutable revision/local files/license, records native package
-pins and writes `results/resolved_config.json`. Initial null revision/environment
-fields in `config/study.json` are acquisition outputs, not guessed identities.
+pins and writes `results/resolved_config.json`. Native execution uses
+`config/study-pinned.json`, which pins the first observed immutable model
+snapshot. Its nullable environment field is an acquisition output, not a
+guessed identity. `config/study.json` remains the unresolved template.
 Preserve the original invocation config once its receipts are bound; do not
 copy resolved fields back into it. Stages recover the acquisition config, then
 `results/calibration_config.json` for measured policy choices.
@@ -27,9 +29,9 @@ copy resolved fields back into it. Stages recover the acquisition config, then
 Execute in order, from the root with `.venv` active:
 
 ```sh
-python -m signed_study inspect --config config/study.json
-python -m signed_study acquire --config config/study.json
-python -m signed_study audit --config config/study.json
+python -m signed_study inspect --config config/study-pinned.json
+python -m signed_study acquire --config config/study-pinned.json
+python -m signed_study audit --config config/study-pinned.json
 ```
 
 Inspection records hardware, RAM, power, process-tree RSS, disk, packages and
@@ -47,7 +49,7 @@ from pathlib import Path
 from signed_study.protocol import load_config
 from signed_study.budget import Ledger
 from signed_study.stage_evidence import record_correctness
-config = load_config(Path('config/study.json'))
+config = load_config(Path('config/study-pinned.json'))
 ledger = Ledger(config.paths['results'] / 'budget_ledger.jsonl', config)
 try:
     result = record_correctness(config, ledger)
@@ -55,10 +57,10 @@ finally:
     ledger.close()
 raise SystemExit(0 if result['status'] == 'completed' else 2)
 PY
-python -m signed_study calibrate --config config/study.json
-python -m signed_study smoke --config config/study.json --development-users 8
-python -m signed_study develop --config config/study.json
-python -m signed_study freeze --config config/study.json
+python -m signed_study calibrate --config config/study-pinned.json
+python -m signed_study smoke --config config/study-pinned.json --development-users 8
+python -m signed_study develop --config config/study-pinned.json
+python -m signed_study freeze --config config/study-pinned.json
 python -m signed_study confirm --lock results/protocol.lock.json
 python -m signed_study diagnose --lock results/protocol.lock.json
 python -m signed_study report --results results
