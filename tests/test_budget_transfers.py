@@ -190,12 +190,13 @@ def test_forecasts_use_reallocated_stage_limits(transfer_case, local_config, con
         evaluate = lambda: forecast_scale(measured(), cohort(), fake)
     else:
         store = cohort(32,1)
-        result = dict(comparison_schedule=[dict(fit_family='SignedMax',parameters={'K':1,'lambda':0},geometric=True)],
+        result = dict(comparison_schedule=[dict(name='SignedMax',fit_family='SignedMax',parameters={'K':1,'lambda':0},geometric=True)],
                       confirmation_user_ids=[10000],development_user_ids=[1])
         timings = [dict(family='SignedMax',support_count=100,positive_count=95,negative_count=5,
                         candidate_count=20,K=1,chunk_size=512,fit_seconds=1.,score_seconds=0.,
                         write_seconds=0.,overhead_seconds=0.)]
-        calibration = {'forecast': {'catalog_items': 300, 'planning': {'confirmation_entries':13,
+        calibration = {'calibration_user_ids': [e.history.user_id for e in store.development],
+                       'forecast': {'catalog_items': 300, 'planning': {'confirmation_entries':13,
                        'timing_evaluations':2496,'numerical_diagnostic_evaluations':704}}}
         evaluate = lambda: refresh_selected_forecast(result,store,timings,local_config,fake,calibration)
     assert evaluate()['status'] == 'infeasible'

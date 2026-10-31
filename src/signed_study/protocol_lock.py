@@ -147,9 +147,7 @@ def _validate_schedule(development,config,store,ledger):
             raise ProtocolMismatch('Invalid planned user IDs')
     forecast=development['selected_forecast']; state=ledger.snapshot(); caps=config.resources
     seconds=forecast['seconds']; evaluations=forecast['evaluations']
-    dev={e.history.user_id:e for e in store.development}
-    timing=(select_calibration_users([dev[u] for u in development['development_user_ids']])
-            if len(development['development_user_ids'])>=32 else development['development_user_ids'])
+    timing=select_calibration_users(list(store.development))
     numerical=development['confirmation_user_ids'][:64]
     diagnostic_count=len(timing)*13*(config.timing['warmups']+config.timing['repetitions'])+len(numerical)*sum(s['geometric'] for s in schedule)
     if (forecast['status']!='feasible' or forecast['comparison_schedule']!=schedule or forecast['comparison_entries']!=13
@@ -160,6 +158,17 @@ def _validate_schedule(development,config,store,ledger):
             or evaluations['G4']!=len(development['confirmation_user_ids'])*13
             or forecast['safety_multiplier']!=caps['safety_multiplier']):
         raise ProtocolMismatch('Selected forecast does not price the executable schedule')
+    from .diagnostics import APPLICABILITY, CONTAMINATION_METHODS
+    plan=forecast.get('contamination',{})
+    if (plan.get('user_ids')!=development['confirmation_user_ids'][:config.contamination['max_users']]
+            or plan.get('seeds')!=list(config.contamination_seeds)
+            or plan.get('schedule')!=[s for s in schedule if s['name'] in CONTAMINATION_METHODS]
+            or plan.get('applicability')!=APPLICABILITY or plan.get('minimum_subgroup_users')!=100
+            or plan.get('numerical_auc_threshold')!=config.delta
+            or plan.get('minimum_extra_seconds')!=config.contamination['minimum_extra_seconds']
+            or plan.get('evaluations')!=len(plan.get('user_ids',[]))*12
+            or not isinstance(plan.get('seconds'),(int,float)) or not math.isfinite(plan['seconds']) or plan['seconds']<0):
+        raise ProtocolMismatch('Conditional diagnostic plan is not frozen completely')
     if any(not math.isfinite(seconds[s]) or seconds[s]<0 or state['stage_seconds'][s]+caps['safety_multiplier']*seconds[s]>state['stage_limits'][s] for s in ('G4','G5')) or state['attempted_evaluations']+sum(evaluations.values())>caps['evaluation_limit'] or state['experimental_seconds']+caps['safety_multiplier']*sum(seconds.values())>caps['experimental_seconds']-caps['report_reserve_seconds']:
         raise ProtocolMismatch('Selected schedule no longer fits effective resource limits')
 

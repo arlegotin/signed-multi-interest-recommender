@@ -8,7 +8,7 @@ from threadpoolctl import threadpool_limits
 
 from .budget import BudgetExceeded, atomic_write_json
 from .calibration import _fit_cost, _score_units, planned_comparison_schedule, select_calibration_users
-from .metrics import macro_average, planned_half_width, select_family, select_comparator
+from .metrics import history_statistics, macro_average, planned_half_width, select_family, select_comparator
 from .models import endpoint_requests, initial_configurations, model_configuration
 from .protocol import canonical_sha256
 from .stage_evidence import plain, config_record
@@ -134,8 +134,7 @@ def refresh_selected_forecast(result,store,timings,config,ledger,calibration):
     confirmation={e.history.user_id:e for e in store.confirmation}
     planned=[confirmation[u] for u in result['confirmation_user_ids']]
     development={e.history.user_id:e for e in store.development}
-    dev=[development[u] for u in result['development_user_ids']]
-    timing_users=select_calibration_users(dev) if len(dev)>=32 else result['development_user_ids']
+    timing_users=calibration['calibration_user_ids']
     catalog=calibration['forecast'].get('catalog_items',calibration.get('catalog_items'))
     if type(catalog) is not int or catalog<=0:
         raise ValueError('Selected-method timing requires measured catalog cardinality')
@@ -145,7 +144,7 @@ def refresh_selected_forecast(result,store,timings,config,ledger,calibration):
     geometric=[entry for entry,slot in zip(entries,schedule) if slot['geometric']]
     seconds={'G4':projected_cost(planned,entries,timings,config,exact_parameters=True),
              'G5':repeats*projected_cost(timing_episodes,entries,timings,config,exact_parameters=True)
-                  +projected_cost(numerical,geometric,timings,config,exact_parameters=True)}
+                  +projected_cost(numerical,geometric,timings,config,exact_parameters=True)+2}
     evaluations={'G4':len(planned)*len(entries),
                  'G5':len(timing_users)*len(entries)*repeats+len(numerical)*len(geometric)}
     state=ledger.snapshot(); caps=config.resources; margin=caps['safety_multiplier']
@@ -161,7 +160,20 @@ def refresh_selected_forecast(result,store,timings,config,ledger,calibration):
     allowance=calibration['forecast']['planning']
     feasible=feasible and len(entries)<=allowance['confirmation_entries'] and (
         evaluations['G5']<=allowance['timing_evaluations']+allowance['numerical_diagnostic_evaluations'])
-    return dict(status='feasible' if feasible else 'infeasible',seconds=seconds,evaluations=evaluations,
+    from .diagnostics import APPLICABILITY, CONTAMINATION_METHODS
+    contamination_users=planned[:config.contamination['max_users']]
+    contamination_schedule=[s for s in schedule if s['name'] in CONTAMINATION_METHODS]
+    contamination=dict(user_ids=[e.history.user_id for e in contamination_users],
+        seeds=list(config.contamination_seeds),schedule=contamination_schedule,
+        seconds=len(config.contamination_seeds)*projected_cost(contamination_users,
+            [model_configuration(s['fit_family'],s['parameters']) for s in contamination_schedule],timings,config,exact_parameters=True),
+        evaluations=len(contamination_users)*len(config.contamination_seeds)*len(contamination_schedule),
+        applicability=APPLICABILITY,minimum_subgroup_users=100,numerical_auc_threshold=config.delta,
+        planned_sample_counts=dict(contamination_users=len(contamination_users),numerical_users=len(numerical),timing_users=len(timing_users)),
+        gain_predicate='lower CI > 0; diagnostic gain only, not delta practical success',
+        minimum_extra_seconds=config.contamination['minimum_extra_seconds'],
+        policy='conditional only; first hash-ordered users; no retuning; protected reporting reserve')
+    return dict(status='feasible' if feasible else 'infeasible',seconds=seconds,evaluations=evaluations,contamination=contamination,
                 comparison_entries=len(entries),comparison_schedule=schedule,timing_user_ids=list(timing_users),
                 numerical_user_ids=[e.history.user_id for e in numerical],catalog_items=catalog,
                 cost_chunk_size=config.numerics['score_chunk_size'],safety_multiplier=margin,
@@ -275,10 +287,7 @@ def _finalize(config,ledger,store,cache,calibration,users,cohort,entries,attempt
                                          basis='paired development SD; optimistic planning estimate')
         histories=[]
         for e in cohort:
-            P=cache.rows(e.history.positive_ids); N=cache.rows(e.history.negative_ids)
-            histories.append(dict(user_id=e.history.user_id,H=float(1-np.linalg.norm(P.mean(axis=0))**2),
-                O=float(np.max(P@N.T,axis=1).mean()),negative_mean_norm=float(np.linalg.norm(N.mean(axis=0))),
-                negative_count=len(N)))
+            histories.append(dict(user_id=e.history.user_id, **history_statistics(e.history,cache)))
         result['history_statistics']=histories
         result['history_thresholds']={key:float(np.median([r[key] for r in histories])) for key in ('H','O')}
         result['boundary_winners']=_boundary_coverage(choices,rows,config)

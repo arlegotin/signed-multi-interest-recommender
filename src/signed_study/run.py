@@ -166,3 +166,13 @@ def freeze_protocol(config: StudyConfig, development: dict, ledger: Ledger) -> P
 def confirm(lock_path: Path, ledger: Ledger) -> dict:
     from .confirmation import confirm as execute
     return execute(lock_path, ledger)
+
+
+def contaminate_history(history, seed: int):
+    from .diagnostics import contaminate_history as execute
+    return execute(history, seed)
+
+
+def diagnose(lock_path: Path, ledger: Ledger) -> dict:
+    from .diagnostics import diagnose as execute
+    return execute(lock_path, ledger)

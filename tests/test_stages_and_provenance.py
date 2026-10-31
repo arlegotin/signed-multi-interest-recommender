@@ -1055,3 +1055,9 @@ def test_frozen_config_roundtrip_keeps_validation(study_config_path):
     changed=config_record(config)
     changed['delta']=.005
     with pytest.raises(ValueError): protocol.config_from_record(changed)
+
+
+def test_public_diagnostics_entrypoints():
+    from signed_study import run, metrics
+    assert callable(run.diagnose) and callable(run.contaminate_history)
+    assert metrics.assign_stratum(.2,.3,{'H':.2,'O':.3})=='high_H_high_O'

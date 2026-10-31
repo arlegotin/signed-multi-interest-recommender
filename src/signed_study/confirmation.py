@@ -318,3 +318,28 @@ def confirm(lock_path,ledger):
 
 def record_implementation_correction(lock_path,ledger,reason):
     return _serialized(lock_path,_record_implementation_correction,ledger,reason)
+
+
+def load_saved_confirmation(lock_path, ledger, *, permit=None):
+    """Read and qualify a finished result without admission, analysis or writes.
+
+    No confirmation execution/resume or outcome-array read is allowed here.
+    Callers with a permit have already independently verified the live context.
+    """
+    events=read_events(lock_path)
+    authorization=next((e for e in reversed(events) if e['kind']=='correction_authorized'),None)
+    if permit is None:
+        live=protocol_lock.live_inputs(ledger.config,ledger)
+        permit=(_verify_correction(lock_path,live,authorization) if authorization else
+                protocol_lock.verify_protocol(lock_path,live))
+    interpretation=('corrected_exploratory' if authorization else
+                    'invalid_confirmatory' if any(e['kind']=='invalidated' for e in events) else 'confirmatory')
+    run_id=authorization['correction_id'] if authorization else permit.lock_hash
+    finished=next((e for e in reversed(events) if e['kind']=='run_finished' and e['run_id']==run_id),None)
+    if finished is None:
+        raise ProtocolMismatch('No finished saved confirmation; diagnostics cannot resume analysis')
+    ref=finished['artifact']; protocol_lock.evidence.verify_reference(ref)
+    result=json.loads(Path(ref['path']).read_text()); verify_record(result)
+    if result['run_id']!=run_id or result['lock_sha256']!=permit.lock_hash:
+        raise ProtocolMismatch('Saved confirmation identity mismatch')
+    return _qualify_summary(result,ledger,interpretation)

@@ -234,3 +234,21 @@ def paired_analysis(scheduled_user_ids: Sequence[int], signed_auc: Mapping[int, 
     result['standard_error'] = (result['complete_case']['standard_error']
                                 if len(complete) == len(ids) else None)
     return result
+
+
+def history_statistics(history, embeddings) -> dict:
+    """Capped support geometry, shared by development thresholds and strata."""
+    P = np.asarray(embeddings.rows(history.positive_ids), dtype=np.float64)
+    N = np.asarray(embeddings.rows(history.negative_ids), dtype=np.float64)
+    if not len(P) or not len(N):
+        raise ValueError('history statistics require both support classes')
+    return dict(H=float(1 - np.linalg.norm(P.mean(axis=0)) ** 2),
+                O=float(np.max(P @ N.T, axis=1).mean()),
+                negative_mean_norm=float(np.linalg.norm(N.mean(axis=0))), negative_count=len(N))
+
+
+def assign_stratum(H: float, O: float, thresholds: dict) -> str:
+    """Equality belongs to high; thresholds are frozen development medians."""
+    if not np.isfinite([H, O, thresholds['H'], thresholds['O']]).all():
+        raise ValueError('finite history statistics and thresholds required')
+    return f"{'high' if H >= thresholds['H'] else 'low'}_H_{'high' if O >= thresholds['O'] else 'low'}_O"
