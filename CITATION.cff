@@ -1,0 +1,29 @@
+cff-version: 1.2.0
+message: "If you use this software or its reported results, please cite this repository and record the commit used."
+type: software
+title: "Signed multi-interest recommendation"
+authors:
+  - family-names: Legotin
+    given-names: Artem
+version: 0.1.0
+date-released: "2026-10-31"
+repository-code: "https://github.com/arlegotin/signed-multi-interest-recommender"
+url: "https://github.com/arlegotin/signed-multi-interest-recommender"
+license:
+  - AGPL-3.0-only
+  - CC-BY-4.0
+abstract: >-
+  Research software for explicit-negative ranking on frozen content embeddings.
+  Includes SignedMax, linear and kernel baselines, matched controls, temporal
+  user-disjoint evaluation, immutable confirmation provenance, paired user
+  bootstrap comparisons and CPU cost measurements. On MovieLens 1M with a fixed
+  MiniLM encoder, all 13 frozen method slots completed for 1776 confirmation
+  users. SignedMax underperformed preselected logistic regression and the
+  negative-mean baseline. Published aggregates and a dependency-free checker
+  support inspection without distributing dataset contents or model weights.
+keywords:
+  - recommender systems
+  - explicit negative feedback
+  - content embeddings
+  - reproducible research
+  - negative results

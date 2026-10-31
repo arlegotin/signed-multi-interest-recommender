@@ -1,11 +1,14 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "signed-study"
 version = "0.1.0"
-description = "A bounded study of signed multi-interest recommendation"
+description = "Reproducible study of explicit-negative ranking on frozen content embeddings"
+authors = [{name = "Artem Legotin"}]
+license = "AGPL-3.0-only AND CC-BY-4.0"
+license-files = ["LICENSE", "NOTICE", "LICENSING.md", "THIRD_PARTY_NOTICES.md", "licenses/*.txt"]
 requires-python = ">=3.11,<3.13"
 readme = "README.md"
 dependencies = [
@@ -21,6 +24,10 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest"]
+
+[project.urls]
+Repository = "https://github.com/arlegotin/signed-multi-interest-recommender"
+Results = "https://github.com/arlegotin/signed-multi-interest-recommender/blob/main/docs/study-outcome.md"
 
 [tool.setuptools.packages.find]
 where = ["src"]

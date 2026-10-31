@@ -1,0 +1,13 @@
+include README.md REPRODUCE.md CHANGELOG.md CITATION.cff
+include LICENSE NOTICE LICENSING.md THIRD_PARTY_NOTICES.md requirements.lock.txt
+recursive-include licenses *.txt
+recursive-include config *.json
+recursive-include docs *.md *.csv *.json *.png
+recursive-include scripts *.py
+recursive-include tests *.py
+prune data
+prune results
+prune .cache
+prune .venv
+prune .superpowers
+global-exclude __pycache__ *.py[cod] .DS_Store
