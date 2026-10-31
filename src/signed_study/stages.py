@@ -230,6 +230,11 @@ def _calibrate(config,ledger,attempts):
                         stop_reason='Unresolved calibration validity/convergence evidence',repair_decisions=measured['repair_decisions'])
         forecast=measurements['forecast']
         if forecast['status']!='feasible':
+            # Preserve the exact measured stop evidence at its owning terminal
+            # admission. Reporting must not trust a later self-checksummed file.
+            ledger.finish(aid,'failed',{'exception':forecast['stop_reason']},
+                          {'calibration':file_reference(config.paths['results']/'calibration.json'),
+                           'attempts':file_reference(workload_path)})
             raise StageBlocked(forecast['stop_reason'])
         policy=forecast['policy']
         resolved=replace(resolved,encoder={**resolved.encoder,'batch_size':policy['embedding_batch_size']},

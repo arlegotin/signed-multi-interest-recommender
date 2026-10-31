@@ -154,7 +154,7 @@ def test_report_early_stops(local_config, blocker):
     result=report.render_report(root)
     text=Path(result['report']).read_text()
     assert result['outcome']=='inconclusive evidence' and 'not executed' in text and blocker in text
-    assert not result['figures'] and len(result['tables'])==1  # cost table only
+    assert not result['figures'] and len(result['tables'])==2  # cost/actual-work tables only
 
 
 def test_historical_reader_is_nonmutating_and_checks_anchor(saved_evidence, monkeypatch):
@@ -231,7 +231,7 @@ def test_report_missing_baseline_and_analysis_pending_remain_inconclusive(saved_
         fields={k:v for k,v in e.items() if k not in ('schema_version','output_sha256','previous_sha256','lock_sha256','kind')}
         confirmation._event(lock,e['kind'],**fields)
     result=report.render_report(root)
-    assert result['outcome']=='inconclusive evidence' and len(result['tables'])==1
+    assert result['outcome']=='inconclusive evidence' and len(result['tables'])==2
     assert 'analysis pending' in Path(result['report']).read_text()
     assert not (root/'comparisons.csv').exists()
     assert not (root/'paired-intervals.png').exists()
@@ -297,7 +297,8 @@ def test_historical_report_survives_changed_head_and_missing_installed_model(sav
     assert second['outcome']==first['outcome'] and Path(second['tables'][0]).read_bytes()==table
 
 
-def test_saved_measured_scaling_stop_is_practical_infeasibility(saved_evidence):
+@pytest.mark.parametrize('published',[False,True])
+def test_saved_measured_scaling_stop_is_practical_infeasibility(saved_evidence,published):
     from signed_study import report
     root,ledger,lock,_=saved_evidence
     lock.unlink();lock.with_suffix('.sha256').unlink()
@@ -306,8 +307,91 @@ def test_saved_measured_scaling_stop_is_practical_infeasibility(saved_evidence):
         forecast=dict(status='infeasible',tested_scales=[[418,1776],[256,1000]],
                       support_model='upper observed size-bin envelope plus measured nonnegative slope',stop_reason=reason)))
     with ledger.work('G2',0,1) as aid:
-        ledger.finish(aid,'failed',{'exception':reason},{})
+        from signed_study.stage_evidence import file_reference
+        ledger.finish(aid,'failed',{'exception':reason},
+                      {'calibration':file_reference(root/'calibration.json')} if published else {})
     save(root/'stages'/'calibrate.failed-fixture.json',dict(stage='calibrate',status='blocked',artifacts={},attempt_ids=[aid],stop_reason=reason))
     result=report.render_report(root)
-    assert result['outcome']=='practical infeasibility'
+    assert result['outcome']==('practical infeasibility' if published else 'inconclusive evidence')
     assert '[256, 1000]' in Path(result['report']).read_text()
+    if published:
+        record=json.loads((root/'calibration.json').read_text())
+        record['forecast']['tested_scales']=[[1,1]]
+        save(root/'calibration.json',record)
+        changed=report.render_report(root)
+        assert changed['outcome']=='inconclusive evidence'
+        assert any('publication' in p for p in changed['limitations'])
+
+
+def test_actual_work_accounts_all_stages_once_and_preserves_unknown(saved_evidence,monkeypatch):
+    import csv
+    from signed_study import report,confirmation,protocol_lock,diagnostics
+    from signed_study.stage_evidence import file_reference
+    root,ledger,lock,saved=saved_evidence
+    monkeypatch.setattr(report,'_figures',lambda *a:[])
+    def rows(statuses):
+        return [dict(evaluation_index=i,user_id=i,slot='SignedMax',configuration_id='s',status=s) for i,s in enumerate(statuses)]
+    def stage(name,stage_name,record,filename):
+        path=root/filename
+        with ledger.work(stage_name,0,len(record['attempts'])+len(record.get('pilot_attempts',[]))) as aid:
+            save(path,record)
+            refs={name if name!='develop' else 'development':file_reference(path)}
+            if name=='calibrate':
+                cache=root/'old-cache.npy';cache.write_bytes(b'old cache')
+                refs['cache_vectors']=file_reference(cache)
+            save(root/'stages'/f'{name}.json',dict(stage=name,status='completed',attempt_ids=[aid],
+                artifacts=refs,stop_reason=None))
+            if name=='calibrate': cache.unlink()  # historical report needs no installed cache
+            ledger.finish(aid,'completed',{}, {name:file_reference(path)})
+    stage('calibrate','G2',dict(status='completed',actual_evaluations=3,attempts=rows(['completed','completed','failed'])), 'calibration.json')
+    stage('smoke','G3',dict(actual_evaluations=2,attempts=rows(['completed','failed'])),'smoke.json')
+    main_rows=rows(['completed','completed','started'])
+    main_rows[1]['evaluation_index']=0  # counters restart in each saved batch
+    stage('develop','G3',dict(actual_evaluations=5,attempts=main_rows,
+        pilot_attempts=rows(['completed','failed'])),'development.json')
+    # An evaluation reservation without retained evidence must not become zero.
+    with ledger.work('G3',0,7): pass
+    digest,payload=protocol_lock.read_lock(lock)
+    inputs=diagnostics._diagnostic_inputs(digest,payload,saved,confirmation.read_events(lock))
+    timing=[dict(kind='timing',user_id=1,slot='SignedMax',repeat=i,warmup=i==0,status=s) for i,s in enumerate(['completed','completed','failed'])]
+    numerical=[dict(kind='numerical',user_id=u,slot='SignedMax',status=s) for u,s in [(1,'completed'),(2,'unavailable')]]
+    contamination=[dict(kind='contamination',user_id=1,slot='SignedMax',seed=1101,status='completed')]
+    path=root/f'diagnostics-{digest}.json';journal=path.with_suffix('.jsonl')
+    with ledger.work('G5',0,6) as aid:
+        journal.write_text('')
+        for r in [dict(timing[0],status='started'),timing[0],*numerical,*contamination]:
+            r=dict(r,schema_version=1,lock_sha256=digest);r['output_sha256']=canonical_sha256(r)
+            with journal.open('a') as f:f.write(json.dumps(r)+'\n')
+        save(path,dict(lock_sha256=digest,confirmation_run_id=digest,confirmation_artifact=inputs['confirmation_artifact'],
+            inputs=inputs,input_sha256=canonical_sha256(inputs),confirmation_status='completed',confirmation_interpretation='confirmatory',
+            status='completed',attempt_ids=[aid],artifact_path=str(path),attempt_journal=file_reference(journal),
+            numerical=numerical,timing={'attempts':timing},contamination={'status':'completed','attempts':contamination}))
+        ledger.finish(aid,'completed',{}, {'diagnostics':file_reference(path)})
+    # A corrected rerun is additional executed work; scientific rows remain its
+    # current six evaluations, while original confirmation/diagnostics persist.
+    confirmation._event(lock,'correction_authorized',correction_id='corrected',reason='fixture correction')
+    with ledger.work('repair',0,6) as aid:
+        clone=dict(saved,run_id='corrected',interpretation='corrected_exploratory',attempt_ids=[aid],artifact_path=str(root/'confirmation-corrected.json'))
+        save(Path(clone['artifact_path']),clone)
+        confirmation._event(lock,'run_started',run_id='corrected',ledger_attempt_id=aid)
+        confirmation._event(lock,'run_finished',run_id='corrected',artifact=file_reference(clone['artifact_path']),interpretation='corrected_exploratory')
+        ledger.finish(aid,'completed',{}, {'confirmation':file_reference(clone['artifact_path'])})
+    with ledger.work('G4',0,2) as aid:
+        confirmation._event(lock,'run_started',run_id='000-unavailable',ledger_attempt_id=aid)
+        confirmation._event(lock,'run_finished',run_id='000-unavailable',
+            artifact={'path':str(root/'lost-run.json'),'sha256':'0'*64},interpretation='invalid_confirmatory')
+        ledger.finish(aid,'failed',{}, {})
+    result=report.render_report(root)
+    with next(Path(p) for p in result['tables'] if p.endswith('actual-work.csv')).open() as f:
+        counts={r['work']:r for r in csv.DictReader(f)}
+    assert (counts['calibration']['attempted'],counts['calibration']['completed'],counts['calibration']['failed'])==('3','2','1')
+    assert counts['smoke']['attempted']=='2'
+    assert (counts['development']['attempted'],counts['development']['pilot_attempted'])==('5','2')
+    assert (counts['development']['completed'],counts['development']['failed'],counts['development']['unfinished'])==('3','1','1')
+    assert counts['confirmation']['attempted']=='12'
+    assert (counts['diagnostics']['attempted'],counts['diagnostics']['completed'],counts['diagnostics']['failed'],counts['diagnostics']['unavailable'])==('5','4','1','1')
+    assert counts['unassigned_G3']['attempted']=='' and counts['unassigned_G3']['reserved']=='7'
+    before=next(Path(p).read_bytes() for p in result['tables'] if p.endswith('actual-work.csv'))
+    with ledger.work('G4',0,0): pass  # metadata/current-context read is not an evaluation
+    report.render_report(root)
+    assert next(Path(p).read_bytes() for p in result['tables'] if p.endswith('actual-work.csv'))==before

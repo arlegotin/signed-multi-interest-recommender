@@ -128,6 +128,28 @@ def test_calibration_orders_probe_cache_and_user_fits(pipeline):
     assert ledger.snapshot()['attempted_evaluations']==before
 
 
+def test_infeasible_calibration_publishes_failed_measurements(pipeline,monkeypatch):
+    from signed_study.stage_evidence import file_reference
+    config,ledger,_,_,_,stages,_,_=pipeline
+    prepare(pipeline)
+    original=stages.measure_users
+    def measured(*a,**kw):
+        result=original(*a,**kw)
+        result.update(actual_evaluations=1,attempts=[dict(evaluation_index=0,status='completed')])
+        return result
+    monkeypatch.setattr(stages,'measure_users',measured)
+    monkeypatch.setattr(stages,'forecast_scale',lambda *a:dict(status='infeasible',tested_scales=[[256,1000]],stop_reason='smallest scale exceeds caps'))
+    result=stages.run_stage('calibrate',config,ledger)
+    assert result['status']=='blocked' and result['stop_reason']=='smallest scale exceeds caps'
+    measurements=file_reference(config.paths['results']/'calibration.json')
+    final=ledger.snapshot()['attempts'][result['attempt_ids'][-1]]
+    assert final['stage']=='G2' and final['status']=='failed'
+    assert final['outputs']['calibration']==measurements
+    assert final['measurements']['exception']=='smallest scale exceeds caps'
+    from signed_study.report import render_report
+    assert render_report(config.paths['results'])['outcome']=='practical infeasibility'
+
+
 @pytest.mark.parametrize('fault',['g1','bad_probe','cache','memory','reserve','provenance'])
 def test_calibration_refuses_invalid_prerequisites(pipeline,monkeypatch,fault):
     config,ledger,clock,resources,events,stages,_,_=pipeline

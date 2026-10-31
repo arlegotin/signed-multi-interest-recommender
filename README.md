@@ -107,7 +107,7 @@ study downloads or acquired labels.
 Reporting reads saved evidence only: no acquisition, encoding, fitting, scoring,
 confirmation resume, bootstrap inference or outcome-array access.
 `report --results results` works for early stops and non-target evidence. It
-writes `report.md`, `costs.csv`, observed `comparisons.csv`, applicable paired
+writes `report.md`, `costs.csv`, `actual-work.csv`, observed `comparisons.csv`, applicable paired
 figures and `artifact-inventory.json`. Its ten sections distinguish primary B*,
 complete-suite and mechanism claims, retaining missing/invalid baselines,
 analysis-pending work and failure costs. Rerun that command to regenerate.

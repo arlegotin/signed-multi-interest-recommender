@@ -89,6 +89,126 @@ def _figures(root,comparisons):
     return paths
 
 
+def _actual_work(root,ledger,payload,stage_records,problems):
+    """Count retained G2/G3/G4/G5 executions, independently of reservations.
+
+    One unit per admitted workload (or confirmation run), never per metadata
+    read. Development totals include their pilot. Scientific tables still use
+    only the current selected confirmation run.
+    """
+    accounting=ledger.snapshot()['attempts']; units={}; assigned=set()
+    def load(reference):
+        verify_reference(reference)
+        value=json.loads(Path(reference['path']).read_text())
+        if 'measurements' in value:
+            if value['output_sha256']!=canonical_sha256(value['measurements']):
+                raise ProtocolMismatch('Saved workload measurements changed')
+            return value['measurements']
+        verify_record(value);return value
+    def add(work,ids,value,*,rows=None,evidence='bound saved summary'):
+        ids=tuple(sorted(a for a in ids if a in accounting and accounting[a].get('evaluations',0)>0))
+        if not ids: return
+        key=(work,ids)
+        if key in units: return
+        assigned.update(ids)
+        if rows is None:
+            rows=[dict(r,_part='main') for r in value.get('attempts',[])]+[dict(r,_part='pilot') for r in value.get('pilot_attempts',[])]
+        # Started/final rows refer to one execution. Repeats/chunk checks and
+        # seeds remain separate executions; unavailable originals are not fits.
+        unique={}
+        for r in rows:
+            identity=tuple(r.get(k) for k in ('_part','evaluation_index','kind','user_id','configuration_id','slot','repeat','seed','chunk_size'))
+            unique[identity]=r
+        rows=list(unique.values());available=[r for r in rows if r['status']!='unavailable']
+        declared=value.get('actual_evaluations')
+        attempted=max(len(available),declared or 0) if rows or declared is not None else None
+        statuses_known=bool(rows) or declared==0
+        counts={s:sum(r['status']==s for r in available) if statuses_known else None for s in ('completed','failed')}
+        unfinished=sum(r['status'] not in ('completed','failed') for r in available) if statuses_known else None
+        partial=(attempted is None or unfinished or declared is not None and declared>len(available)
+                 or any(accounting[a]['status']!='completed' for a in ids))
+        units[key]=dict(work=work,reserved=sum(accounting[a]['evaluations'] for a in ids),attempted=attempted,
+            **counts,unfinished=unfinished,unavailable=sum(r['status']=='unavailable' for r in rows) if statuses_known else None,
+            pilot_attempted=sum(r.get('_part')=='pilot' and r['status']!='unavailable' for r in rows) if work=='development' else None,
+            status='partial' if partial else 'available',evidence=evidence)
+    # Stage receipts bind workload files. Repeated successful reads do not add
+    # executions, and a development summary already includes all pilot batches.
+    for name,record in stage_records:
+        if name not in ('calibrate','smoke','develop'): continue
+        for label,reference in record.get('artifacts',{}).items():
+            if ((name=='calibrate' and Path(reference['path']).name=='calibration.json')
+                    or name=='smoke' and label in ('attempts','smoke')
+                    or name=='develop' and label=='development'):
+                try:
+                    value=load(reference)
+                    ids=value.get('attempt_ids',record['attempt_ids'])
+                    add({'calibrate':'calibration','smoke':'smoke','develop':'development'}[name],ids,value)
+                except (ValueError,OSError,KeyError,TypeError) as error:problems.append(f'Actual work {name}: {error}')
+    # Failed calibration publications can exist without a completed stage.
+    for aid,attempt in accounting.items():
+        reference=attempt.get('outputs',{}).get('calibration')
+        if reference and attempt['stage']=='G2':
+            try: add('calibration',[aid],load(reference),evidence='terminal G2 publication')
+            except (ValueError,OSError,KeyError,TypeError) as error:problems.append(f'Actual work calibration publication: {error}')
+    lock=root/'protocol.lock.json';historical={}
+    if lock.exists() and payload:
+        try:
+            digest,_=protocol_lock.read_lock(lock)
+            protocol_lock.verify_lock_accounting(payload,digest,{'ledger_events':ledger.snapshot()['events']})
+            events=confirmation.read_events(lock)
+            if any(e['lock_sha256']!=digest for e in events):raise ProtocolMismatch('Work journal lock mismatch')
+            runs={e['run_id'] for e in events if e['kind'] in ('run_started','run_finished')}
+            for run_id in sorted(runs):
+                try:
+                    finished=[e for e in events if e['kind']=='run_finished' and e['run_id']==run_id]
+                    started=[e['ledger_attempt_id'] for e in events if e.get('run_id')==run_id and e['kind']=='run_started']
+                    if finished:
+                        if len(finished)!=1:raise ProtocolMismatch('Ambiguous historical execution run')
+                        ref=finished[0]['artifact'];value=load(ref)
+                        if value['run_id']!=run_id or value['lock_sha256']!=digest:raise ProtocolMismatch('Historical execution identity mismatch')
+                        ids=value['attempt_ids']
+                        if not any(a in accounting and accounting[a].get('outputs',{}).get('confirmation')==ref for a in ids):
+                            raise ProtocolMismatch('Historical confirmation publication missing')
+                        historical[run_id]=value
+                        add('confirmation',ids,value,evidence='published historical run; all original/corrected executions')
+                    else:
+                        rows=[e['attempt'] for e in events if e.get('run_id')==run_id and e['kind']=='evaluation']
+                        add('confirmation',started,{},rows=rows,evidence='partial exposure journal; final total unavailable')
+                except (ValueError,OSError,KeyError,TypeError) as error:problems.append(f'Actual historical run {run_id}: {error}')
+            # Each diagnostic publication keeps its own immutable run inputs.
+            seen=set()
+            for attempt in accounting.values():
+                ref=attempt.get('outputs',{}).get('diagnostics')
+                if not ref or (ref['path'],ref['sha256']) in seen:continue
+                seen.add((ref['path'],ref['sha256']))
+                try:
+                    value=load(ref);original=historical[value['confirmation_run_id']]
+                    inputs=diagnostics._diagnostic_inputs(digest,payload,original,events)
+                    value=diagnostics._load_saved_diagnostics(ref['path'],ledger,inputs)
+                    rows=[dict(r,kind='numerical') for r in value.get('numerical',[])]+[dict(r,kind='timing') for r in value.get('timing',{}).get('attempts',[])]+[dict(r,kind='contamination') for r in value.get('contamination',{}).get('attempts',[])]
+                    # The bound journal preserves partial contamination and
+                    # interrupted rows absent from the final summary arrays.
+                    journal=[]
+                    for line in Path(value['attempt_journal']['path']).read_text().splitlines():
+                        row=json.loads(line);verify_record(row)
+                        if row.get('lock_sha256')!=digest:raise ProtocolMismatch('Diagnostic work journal lock mismatch')
+                        if row.get('kind') in ('numerical','timing','contamination'):journal.append(row)
+                    add('diagnostics',value['attempt_ids'],{},rows=journal+rows,evidence='published diagnostics and bound journal; warmups/repeats included')
+                except (ValueError,OSError,KeyError,TypeError) as error:problems.append(f'Actual diagnostic work publication: {error}')
+        except (ValueError,OSError,KeyError,TypeError) as error:problems.append(f'Actual confirmation work: {error}')
+    result=[]
+    for work in ('calibration','smoke','development','confirmation','diagnostics'):
+        parts=[r for (name,_),r in units.items() if name==work]
+        fields=('reserved','attempted','completed','failed','unfinished','unavailable','pilot_attempted')
+        combined={k:sum(r[k] for r in parts if r[k] is not None) if parts and any(r[k] is not None for r in parts) else None for k in fields}
+        result.append(dict(work=work,**combined,status='partial' if any(r['status']=='partial' for r in parts) else 'available' if parts else 'unavailable',
+                           evidence='; '.join(dict.fromkeys(r['evidence'] for r in parts)) or 'no bound saved actual-work evidence'))
+    for stage in ('G2','G3','G4','G5','repair'):
+        missing=[a for aid,a in accounting.items() if aid not in assigned and a['stage']==stage and a.get('evaluations',0)>0]
+        if missing:result.append(dict(work=f'unassigned_{stage}',reserved=sum(a['evaluations'] for a in missing),attempted=None,completed=None,failed=None,unfinished=None,unavailable=None,pilot_attempted=None,status='unavailable',evidence='reservations retained; actual work evidence unavailable'))
+    return result
+
+
 def render_report(results_directory: Path) -> dict:
     """Render all ten report sections and safe aggregates, including early stops.
 
@@ -97,7 +217,7 @@ def render_report(results_directory: Path) -> dict:
     """
     root=Path(results_directory).resolve(); root.mkdir(parents=True,exist_ok=True)
     problems=[]; inventory=[]; stage_rows=[]; saved=None; diagnostic=None; payload={}; invalid=False
-    qualifications=[]; failed_records=[]
+    qualifications=[]; failed_records=[];stage_records=[]
     config=None; state={}; ledger=None
     def note(path,status,**extra):
         row={'name':str(Path(path).resolve().relative_to(root)),'status':status,**extra}
@@ -131,9 +251,12 @@ def render_report(results_directory: Path) -> dict:
             stage_rows.append(f'{name}: missing or invalid; not executed/verified')
             continue
         try:
-            for ref in row['artifacts'].values(): verify_reference(ref)
             ids=row['attempt_ids']
             if not ids or any(a not in attempts for a in ids): raise ProtocolMismatch('Missing stage ledger attempts')
+            # Preserve independently bound workload summaries even when an
+            # unrelated raw/cache prerequisite is no longer installed.
+            stage_records.append((name,row))
+            for ref in row['artifacts'].values(): verify_reference(ref)
             bad=[attempts[a]['status'] for a in ids if attempts[a]['status']!='completed']
             status='incomplete current accounting' if bad else row['status']
             stage_rows.append(f'{name}: {status}; stop reason: {row.get("stop_reason")}')
@@ -182,8 +305,19 @@ def render_report(results_directory: Path) -> dict:
             try: details[Path(ref['path']).name]=json.loads(Path(ref['path']).read_text())
             except (ValueError,OSError) as error: problems.append(f'{name}: {error}')
     calibration=details.get('calibration.json')
+    calibration_bound=calibration is not None
+    calibration_published=False
+    if (root/'calibration.json').exists():
+        reference=file_reference(root/'calibration.json')
+        calibration_published=any(a['stage']=='G2' and a.get('event')=='finish' and
+            a.get('outputs',{}).get('calibration',{}).get('sha256')==reference['sha256'] and
+            Path(a.get('outputs',{}).get('calibration',{}).get('path','')).resolve()==Path(reference['path']).resolve()
+            for a in attempts.values())
     if calibration is None and (root/'calibration.json').exists():
         calibration=read(root/'calibration.json')
+        calibration_bound=calibration_published
+        if not calibration_bound:
+            problems.append('Calibration publication missing or changed; standalone measurements are unverified and cannot establish measured infeasibility')
     calibration=calibration or {}
     development={}
     if 'development' in artifacts:
@@ -197,7 +331,7 @@ def render_report(results_directory: Path) -> dict:
     resource_limited=bool((not saved and relevant_work and relevant_work[-1]['status']=='budget_exceeded')
                           or saved and saved['status']=='budget_exceeded')
     forecast=calibration.get('forecast') or {}
-    scaling_stop=bool(not saved and calibration.get('status')=='completed' and calibration.get('actual_evaluations',0)>0
+    scaling_stop=bool(not saved and calibration_published and calibration.get('status')=='completed' and calibration.get('actual_evaluations',0)>0
         and forecast.get('status')=='infeasible' and forecast.get('tested_scales')
         and any(a['stage']=='G2' and a['status']=='failed' and a.get('measurements',{}).get('exception')==forecast.get('stop_reason') for a in attempts.values())
         and any(r.get('stage')=='calibrate' and r.get('stop_reason')==forecast.get('stop_reason') for r in failed_records))
@@ -217,6 +351,8 @@ def render_report(results_directory: Path) -> dict:
     cost_rows.append(dict(stage='setup',seconds=state.get('setup_seconds',0),limit_seconds=2700,
                           failed_seconds=sum(a['elapsed_seconds'] for a in attempts.values() if a['stage']=='setup' and a['status']!='completed')))
     tables.append(_table(root/'costs.csv',['stage','seconds','limit_seconds','failed_seconds'],cost_rows))
+    actual_work=_actual_work(root,ledger,payload,stage_records,problems) if ledger else []
+    tables.append(_table(root/'actual-work.csv',['work','reserved','attempted','completed','failed','unfinished','unavailable','pilot_attempted','status','evidence'],actual_work))
     metric_rows=[]
     if saved and saved.get('attempts'):
         from .metrics import METRIC_KEYS
@@ -259,6 +395,7 @@ def render_report(results_directory: Path) -> dict:
         'Hardware (saved inspection; '+('ledger publication verified' if environment_bound else 'not externally verified')+'): '+_json({k:environment.get('hardware',{}).get(k) for k in ('system','machine','chip','installed_ram_bytes','logical_cpus')}),
         'Inspection blockers: '+_json(environment.get('blockers',[])),*stage_rows,
         'Saved measured forecast: '+_json({k:forecast.get(k) for k in ('status','tested_scales','scale','support_model','stop_reason','seconds','safety_multiplier')}),
+        'Calibration measurement provenance: '+('verified saved publication/reference' if calibration_bound else 'unverified or unavailable; cannot determine measured infeasibility'),
         'Scaling qualification: '+('measured saved calibration plus matching permanent G2 failure and failed-stage reason; smallest tested scale shown above' if scaling_stop else 'no terminal measured scaling stop established'),
         f'Confirmation: {saved["status"] if saved else "not executed or no verified finished summary"}. Diagnostics: {diagnostic["status"] if diagnostic else "not executed or unavailable"}.',
         '', '## 3. Provenance and cohort',
@@ -308,6 +445,7 @@ def render_report(results_directory: Path) -> dict:
         'Accounting snapshot as-of ledger event count '+str(len(state.get('events',[])))+'; SHA256 '+canonical_sha256({'events':state.get('events',[])})+'. Repeated CLI reporting extends this ledger; scientific tables retain the same saved values.',
         _json(cost_rows),
         'Cumulative experimental seconds: '+str(state.get('experimental_seconds',0))+'; reserved attempted evaluations: '+str(state.get('attempted_evaluations',0))+'; actual confirmation evaluations: '+str(saved.get('actual_evaluations','unavailable') if saved else 'unavailable')+'. Reservations are not actual executed user/configuration attempts.',
+        'Actual saved work by stage: '+_json(actual_work)+'. Attempted counts include failed/unfinished executions, exclude unavailable numerical originals, include timing warmups/repeats and all retained original/corrected runs. Development includes its pilot; pilot_attempted is a subset, never an extra total. Unknown work remains unavailable rather than zero.',
         'Peak process-tree RSS bytes: '+str(state.get('peak_rss_bytes','unavailable'))+'; peak project disk bytes: '+str(state.get('peak_project_disk_bytes','unavailable'))+'; baseline disk bytes: '+str(state.get('baseline_disk_bytes','unavailable')),
         'Effective reallocations: '+_json([{k:r.get(k) for k in ('source_stage','target_stage','seconds','reason')} for r in state.get('reallocations',[])])+'; protected reporting seconds: '+str(state.get('report_reserve_seconds',1800)),
         'Amortization: 1,000 requests, fit each request and fit reused are separate scenarios only when measured diagnostics exist; item encoding is shared cold cost. No unsupported catalog extrapolation.',
