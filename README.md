@@ -4,6 +4,17 @@ This package implements the bounded CPU study in [the blueprint](docs/blueprint.
 All ordered stage commands and saved-evidence reports are implemented. Synthetic
 test results do not imply that a real experiment has occurred.
 
+The native run stopped at the **G2 declared pipeline forecast gate**. Acquisition,
+audit, current correctness and calibration measurements ran; no cohort was frozen
+and recommendation efficacy remains untested. Measured full-catalog encoding was
+11.19 seconds, 352 fits took 1.33 seconds, and canonical candidate scoring plus
+metrics took 0.50 seconds. A conservative pipeline-overhead forecast blocked all
+permitted schedules. Read [the aggregate outcome](docs/study-outcome.md) and
+[the chronological execution decisions](docs/study-decisions.md). The commands
+below describe the gated protocol, not authorization to resume this stopped run;
+both material repair cycles are used. Regenerate its report from saved evidence
+using the reporting recipe below.
+
 Recreate the native Python 3.11/3.12 environment from the repository root, using
 the platform/Python in saved environment evidence and the exact package pins:
 
@@ -112,11 +123,51 @@ confirmation resume, bootstrap inference or outcome-array access.
 writes `report.md`, `costs.csv`, `actual-work.csv`, observed `comparisons.csv`, applicable paired
 figures and `artifact-inventory.json`. Its ten sections distinguish primary B*,
 complete-suite and mechanism claims, retaining missing/invalid baselines,
-analysis-pending work and failure costs. Rerun that command to regenerate.
+analysis-pending work and failure costs.
 The library API `signed_study.report.render_report(Path('results'))` admits no
 work; the CLI owns G6. Equal saved evidence yields equal scientific tables and
 figures. Repeated CLI admissions extend the ledger, so cost snapshots carry an
 as-of ledger identity and need not remain byte-identical.
+
+For this accepted G2 early stop, the generic CLI has known frozen-cohort,
+forecast-detail and dominant-cost wording limitations. The complete reproduction
+recipe requires the tracked saved-evidence packaging wrapper as a second step:
+
+```sh
+.venv/bin/python -m signed_study report --results results
+.venv/bin/python scripts/render_study_outcome.py --results results
+.venv/bin/python scripts/render_study_outcome.py --results results
+```
+
+Run from the repository root with the existing local evidence and exact pinned
+environment above. Preserve `results/resolved_config.json`, `budget_ledger.jsonl`,
+stage receipts, acquisition/audit/environment metadata, calibration publications
+and their bound dependencies at their recorded paths. Also preserve
+`results/operator_logs/task13-forecast-diagnostic.json`; its immutable SHA and
+calibration/workload references are checked by the wrapper. Existing
+`src/signed_study/report.py` verifies saved prerequisites without constructing a
+model. No stage, outcome-array loading, fitting, encoding or fresh inference is
+part of reporting. Do not recreate missing evidence by resuming unadmitted stages.
+
+Each wrapper invocation owns one G6 admission and calls the admission-free
+renderer API, without nested CLI accounting. It corrects the report's early-stop
+scope and distinguishes measured work from unexecuted forecasts, then writes:
+
+- `results/report.md`: all ten sections plus verified measurement/forecast detail.
+- `actual-calibration-costs.csv` and `.png`: measured phases and workload components.
+- `forecast-stage-costs.csv`, `forecast-scale-attempts.csv` and
+  `forecast-vs-allocation.png`: saved conservative forecasts, explicitly unexecuted.
+- `actual-work.csv`, `costs.csv`, `artifact-inventory.json` and
+  `outcome-reproduction.json`: counts, costs, generated hashes, script/recipe and
+  exact as-of ledger-prefix identities. These filenames are under `results/`.
+
+The second wrapper invocation checks that scientific CSV/PNG hashes equal the
+previous regeneration. Full reports, inventories and cost snapshots can differ
+because G6 extends the ledger. The inventory identifies an exact byte prefix,
+not a claim that the active ledger remains unchanged after reporting finishes.
+Complete workflow narratives and their original-byte SHA index are archived
+locally in `results/operator_logs/workflow/`; regeneration uses no scratch
+workspace files. Local reproducibility artifacts and private data stay ignored.
 
 Historical report validation checks the immutable freeze/publication references,
 journal hash chain/run identity and all current ledger statuses without requiring
