@@ -301,14 +301,14 @@ def _load_saved_diagnostics(path,ledger,expected_inputs):
     """
     try:
         result=json.loads(Path(path).read_text()); verify_record(result)
-        actual=file_reference(path)
+        actual=file_reference(result['artifact_path'])
         accounting=ledger.snapshot()['attempts']
         anchors=[accounting[aid] for aid in result['attempt_ids'] if aid in accounting
                  and accounting[aid]['stage']=='G5' and accounting[aid]['event']=='finish'
                  and accounting[aid].get('outputs',{}).get('diagnostics')==actual]
         if len(anchors)!=1:
             raise ProtocolMismatch('Diagnostic artifact differs from its permanent ledger publication')
-        if (Path(result['artifact_path'])!=Path(path)
+        if (Path(result['artifact_path']).resolve()!=Path(path).resolve()
                 or result['lock_sha256']!=expected_inputs['lock_sha256']
                 or result['confirmation_run_id']!=expected_inputs['confirmation_run_id']
                 or result['confirmation_artifact']!=expected_inputs['confirmation_artifact']

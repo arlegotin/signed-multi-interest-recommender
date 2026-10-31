@@ -166,13 +166,17 @@ def _summary(lock,permit,run_id,interpretation,attempts,attempt_ids,stop_reason,
     return result
 
 
-def _qualify_summary(result,ledger,interpretation):
+def _qualify_summary(result,ledger,interpretation,*,journal_attempt_ids=()):
     """Apply final execution AND analysis accounting to every returned view."""
     accounting=ledger.snapshot()['attempts']
-    failed=[accounting[aid]['status'] for aid in result['attempt_ids'] if accounting[aid]['status']!='completed']
-    if result['interpretation']!=interpretation or failed:
+    ids=set(result['attempt_ids']) | set(result.get('analysis_attempt_ids',[])) | set(journal_attempt_ids)
+    if not ids or not ids<=accounting.keys():
+        raise ProtocolMismatch('Saved confirmation lacks execution/analysis accounting')
+    failed=[accounting[aid]['status'] for aid in sorted(ids) if accounting[aid]['status']!='completed']
+    if result['interpretation']!=interpretation or failed or not ids<=set(result['attempt_ids']):
         result=dict(result)
         result.update(interpretation=interpretation,original_output_sha256=result.pop('output_sha256'))
+        result['attempt_ids']=list(dict.fromkeys([*result['attempt_ids'],*sorted(ids)]))
         if failed:
             result.update(status='budget_exceeded' if 'budget_exceeded' in failed else 'partial',
                           accounting_status=failed,stop_reason='Execution or analysis accounting did not complete successfully')
@@ -332,14 +336,53 @@ def load_saved_confirmation(lock_path, ledger, *, permit=None):
         live=protocol_lock.live_inputs(ledger.config,ledger)
         permit=(_verify_correction(lock_path,live,authorization) if authorization else
                 protocol_lock.verify_protocol(lock_path,live))
-    interpretation=('corrected_exploratory' if authorization else
-                    'invalid_confirmatory' if any(e['kind']=='invalidated' for e in events) else 'confirmatory')
-    run_id=authorization['correction_id'] if authorization else permit.lock_hash
-    finished=next((e for e in reversed(events) if e['kind']=='run_finished' and e['run_id']==run_id),None)
-    if finished is None:
+    return _read_finished_confirmation(lock_path,ledger,permit.lock_hash,events)
+
+
+def _read_finished_confirmation(lock_path,ledger,digest,events):
+    """Common strict/historical saved-run selection and current qualification."""
+    if any(e['lock_sha256']!=digest for e in events):
+        raise ProtocolMismatch('Confirmation journal belongs to a different lock')
+    authorization=next((e for e in reversed(events) if e['kind']=='correction_authorized'),None)
+    latest=next((e for e in reversed(events) if e['kind'] in ('invalidated','correction_authorized')),None)
+    interpretation=('invalid_confirmatory' if latest and latest['kind']=='invalidated' else
+                    'corrected_exploratory' if authorization else 'confirmatory')
+    run_id=authorization['correction_id'] if authorization else digest
+    finished=[e for e in events if e['kind']=='run_finished' and e['run_id']==run_id]
+    if not finished:
         raise ProtocolMismatch('No finished saved confirmation; diagnostics cannot resume analysis')
-    ref=finished['artifact']; protocol_lock.evidence.verify_reference(ref)
+    if len(finished)!=1:
+        raise ProtocolMismatch('Saved confirmation requires a unique finished artifact')
+    ref=finished[0]['artifact']; protocol_lock.evidence.verify_reference(ref)
     result=json.loads(Path(ref['path']).read_text()); verify_record(result)
-    if result['run_id']!=run_id or result['lock_sha256']!=permit.lock_hash:
+    if (result['run_id']!=run_id or result['lock_sha256']!=digest or
+            Path(result['artifact_path'])!=Path(ref['path'])):
         raise ProtocolMismatch('Saved confirmation identity mismatch')
-    return _qualify_summary(result,ledger,interpretation)
+    accounting=ledger.snapshot()['attempts']
+    ids=set(result['attempt_ids']) | set(result.get('analysis_attempt_ids',[]))
+    publications=[accounting[a] for a in ids if a in accounting
+                  and accounting[a]['stage'] in ('G4','repair') and accounting[a]['event']=='finish'
+                  and accounting[a].get('outputs',{}).get('confirmation')==ref]
+    if len(publications)!=1:
+        raise ProtocolMismatch('Saved confirmation differs from permanent ledger publication')
+    journal_ids=[e['ledger_attempt_id'] for e in events if e.get('run_id')==run_id
+                 and e['kind'] in ('run_started','analysis_started')]
+    return _qualify_summary(result,ledger,interpretation,journal_attempt_ids=journal_ids)
+
+
+def load_historical_confirmation(lock_path,ledger):
+    """Validate saved evidence only; never issue a permit for outcome access.
+
+    The immutable freeze and its ledger prefix/publication remain binding. Live
+    source HEAD, installed encoder and caches are deliberately irrelevant here.
+    This is historical validation, not authorization for confirm or diagnose.
+    """
+    digest,payload=protocol_lock.read_lock(lock_path)
+    protocol_lock.verify_lock_accounting(payload,digest,{'ledger_events':ledger.snapshot()['events']})
+    freeze=next(a for a in ledger.snapshot()['attempts'].values() if a['attempt_id']==payload['freeze_attempt_id'])
+    protocol_lock.evidence.verify_reference(freeze['outputs']['sidecar'])
+    reference=freeze['outputs']['protocol_lock']
+    protocol_lock.evidence.verify_reference(reference)
+    if Path(reference['path']).resolve()!=Path(lock_path).resolve() or reference['sha256']!=digest:
+        raise ProtocolMismatch('Historical lock publication identity changed')
+    return _read_finished_confirmation(lock_path,ledger,digest,read_events(lock_path))

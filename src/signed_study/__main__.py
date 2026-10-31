@@ -73,13 +73,32 @@ def main(argv=None):
                 ledger.close()
         print(json.dumps(result, sort_keys=True))
         return 0 if result['status'] == 'completed' else 2
-    if args.command in ('freeze','confirm'):
+    if args.command == 'report':
+        from pathlib import Path
+        import json
+        from .budget import BudgetExceeded, Ledger, LedgerBusy
+        from .report import report_config
+        from .run import render_report
+        ledger=None
+        try:
+            root=Path(args.results)
+            config=report_config(root)
+            ledger=Ledger(root/'budget_ledger.jsonl',config)
+            with ledger.work('G6',1,0):
+                result=render_report(root)
+        except (ValueError,OSError,KeyError,BudgetExceeded,LedgerBusy) as error:
+            parser.exit(2,f'report blocked: {error}\n')
+        finally:
+            if ledger is not None: ledger.close()
+        print(json.dumps(result,sort_keys=True))
+        return 0
+    if args.command in ('freeze','confirm','diagnose'):
         from pathlib import Path
         import json
         from .budget import BudgetExceeded, Ledger, LedgerBusy
         from .protocol import load_config, config_from_record
         from .protocol_lock import read_lock
-        from .run import freeze_protocol, confirm
+        from .run import freeze_protocol, confirm, diagnose
         from .confirmation import record_implementation_correction
 
         ledger=None
@@ -94,10 +113,12 @@ def main(argv=None):
                 development=json.loads((config.paths['results']/'stages'/'develop.json').read_text())
                 path=freeze_protocol(config,development,ledger)
                 result=dict(status='completed',lock=str(path),lock_sha256=read_lock(path)[0])
-            else:
+            elif args.command=='confirm':
                 if args.correction_reason:
                     record_implementation_correction(Path(args.lock),ledger,args.correction_reason)
                 result=confirm(Path(args.lock),ledger)
+            else:
+                result=diagnose(Path(args.lock),ledger)
         except (ValueError,OSError,KeyError,BudgetExceeded,LedgerBusy) as error:
             parser.exit(2,f'{args.command} blocked: {error}\n')
         finally:

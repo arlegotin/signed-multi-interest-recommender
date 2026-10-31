@@ -176,3 +176,8 @@ def contaminate_history(history, seed: int):
 def diagnose(lock_path: Path, ledger: Ledger) -> dict:
     from .diagnostics import diagnose as execute
     return execute(lock_path, ledger)
+
+
+def render_report(results_directory: Path) -> dict:
+    from .report import render_report as execute
+    return execute(results_directory)
