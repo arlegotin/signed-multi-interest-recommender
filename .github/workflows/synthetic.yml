@@ -26,7 +26,10 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
           cache: pip
-      - run: python -m pip install -e '.[test,build]'
+      - name: Install CPU runtime and development tools
+        run: |
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -e '.[test,build]'
       - run: python -m pip check
       - run: python -m pytest -q
       - run: python scripts/verify_public_results.py
@@ -37,6 +40,7 @@ jobs:
       - name: Verify installed wheel outside checkout
         run: |
           python -m venv /tmp/signed-wheel
+          /tmp/signed-wheel/bin/python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
           /tmp/signed-wheel/bin/python -m pip install dist/*.whl
           cp config/study.json /tmp/signed-wheel-config.json
           cd /tmp

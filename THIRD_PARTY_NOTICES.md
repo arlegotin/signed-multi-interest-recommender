@@ -42,7 +42,8 @@ model trained in that paper; use the model card and revision above for it.
 
 Runtime dependencies are installed separately. Their distributions retain their
 own licenses and notices. Core libraries include NumPy, SciPy, scikit-learn,
-PyTorch, Sentence Transformers, Hugging Face Hub, psutil and Matplotlib. No
+PyTorch, Sentence Transformers, Hugging Face Hub, psutil, Matplotlib and
+threadpoolctl. No
 vendored library source or binaries are included; project grants do not replace
 upstream terms. [requirements.lock.txt](requirements.lock.txt) records the
 qualified native environment's versions, not a redistribution of packages.

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "signed-study"
-version = "0.1.0"
+version = "0.2.0"
 description = "Reproducible study of explicit-negative ranking on frozen content embeddings"
 authors = [{name = "Artem Legotin"}]
 license = "AGPL-3.0-only AND CC-BY-4.0"

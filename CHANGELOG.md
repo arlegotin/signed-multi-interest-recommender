@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.2.0 — 2026-10-31
+
+- Verified effective-receipt selection through freeze, full authorized fallback
+  cohorts and terminal inspection ownership, with interrupted-selection recovery.
+- Staged, recoverable report publication; exact export coverage and work counters;
+  retained prior bundles across validation, replacement and accounting failures.
+- Exact immutable embedding indexes, validated episode digest reuse, prepared
+  forecast envelopes and versioned durable workload replay with linear snapshots.
+- Optional bounded Gram retrieval with strict reference rankings by default and
+  separately documented fast-mode scores. The frozen scorer is unchanged.
+- Reconstructable synthetic and original-Torch-cache benchmarks, raw repeat and
+  phase observations, analytic fiber checks, synthetic CI and wheel smoke checks.
+- Concise README, updated citation and release metadata. Scientific aggregates,
+  historical locks and the informative-negative conclusion remain unchanged.
+
 ## 0.1.0 — 2026-10-31
 
 - Initial release of the signed multi-interest ranking study, baselines and

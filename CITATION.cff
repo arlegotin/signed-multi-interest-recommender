@@ -5,7 +5,7 @@ title: "Signed multi-interest recommendation"
 authors:
   - family-names: Legotin
     given-names: Artem
-version: 0.1.0
+version: 0.2.0
 date-released: "2026-10-31"
 repository-code: "https://github.com/arlegotin/signed-multi-interest-recommender"
 url: "https://github.com/arlegotin/signed-multi-interest-recommender"
@@ -21,9 +21,17 @@ abstract: >-
   users. SignedMax underperformed preselected logistic regression and the
   negative-mean baseline. Published aggregates and a dependency-free checker
   support inspection without distributing dataset contents or model weights.
+  Version 0.2 adds verified pre-freeze receipt selection and fallback cohorts,
+  recoverable evidence publication, durable workload replay, prepared cost
+  forecasts and optional memory-bounded Gram retrieval. Strict retrieval retains
+  reference rankings; opt-in fast ranking has separate numerical semantics and
+  source-bound performance observations. Engineering improvements do not change
+  the completed study's predictive conclusion.
 keywords:
   - recommender systems
   - explicit negative feedback
   - content embeddings
   - reproducible research
   - negative results
+  - bounded retrieval
+  - evidence integrity

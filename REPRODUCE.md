@@ -27,6 +27,13 @@ See [the outcome](docs/study-outcome.md) for interpretation and scope.
 
 ## Install and test
 
+Release 0.2.0 contains the workflow/retrieval engineering continuation. Its saved
+performance observations were measured before the release metadata update and
+retain their original source identities; implementation commit `67fb038` and the
+raw executed-file hashes identify that code. The completed accuracy study still
+belongs to the earlier scientific revision described below. Release preparation
+does not regenerate those observations or authorize another confirmation run.
+
 The package supports Python 3.11–3.12. The recorded experiment used native
 Apple arm64 Python 3.12.9. `requirements.lock.txt` pins that native environment;
 it is not a guarantee that identical wheels exist on every platform.
