@@ -34,12 +34,56 @@ def require_full_cohort(config,cohort,planned,state):
         return
     dataset=cohort.audit['dataset']
     counts={'ml-1m':(418,1776),'ml-100k':(62,225)}
-    if dataset!=config.dataset or dataset not in counts:
+    if dataset not in counts:
         raise ValueError('Results-first full cohort requires the original official dataset')
     for role,count in zip(('development','confirmation'),counts[dataset]):
-        expected=sorted([e.history.user_id for e in getattr(cohort,role)],key=user_digest)
-        if len(expected)!=count or len(set(expected))!=count or planned.get(role)!=expected:
+        episodes=getattr(cohort,role)
+        expected=sorted([e.history.user_id for e in episodes],key=user_digest)
+        supplied=planned.get(role)
+        if (len(expected)!=count or len(set(expected))!=count or supplied!=expected
+                or not isinstance(supplied,list) or any(type(uid) is not int for uid in supplied)
+                or any(type(e.history.user_id) is not int or e.history.role!=role for e in episodes)):
             raise ValueError(f'Results-first requires the full audited digest-ordered {role} cohort')
+    if {e.history.user_id for e in cohort.development} & {e.history.user_id for e in cohort.confirmation}:
+        raise ValueError('Results-first full cohort has overlapping user partitions')
+    try:
+        _verify_cohort_binding(config,cohort,state)
+    except (OSError,KeyError,TypeError) as error:
+        raise ValueError('Results-first full cohort requires complete verified acquisition/audit evidence') from error
+
+
+def _verify_cohort_binding(config,cohort,state):
+    """Permit only the already acquired/audited dataset, retaining invocation.
+
+    A dataset string and the expected counts are insufficient: verify the exact
+    terminal acquisition/audit receipts, official access evidence and immutable
+    episode records. This opens no outcome arrays.
+    """
+    import json
+    from pathlib import Path
+    from .data import episode_store_digest, load_episode_store
+    from .stage_evidence import read_stage, file_reference
+    from .stages import _official
+    if config.dataset!='ml-1m':
+        raise ValueError('Results-first full cohort dataset substitution is unauthorized')
+    acquired=read_stage(config,'acquire')
+    audited=read_stage(config,'audit',{'acquire':acquired['output_sha256']})
+    for record,allowed in ((acquired,('G0','setup')),(audited,('G0',))):
+        if not record['attempt_ids'] or any(state['attempts'].get(a,{}).get('status')!='completed'
+                or state['attempts'].get(a,{}).get('stage') not in allowed for a in record['attempt_ids']):
+            raise ValueError('Full cohort requires completed acquisition/audit accounting')
+    manifest=json.loads(Path(acquired['artifacts']['data_manifest.json']['path']).read_text())
+    _official(manifest,config)
+    if (manifest['dataset']!=cohort.audit['dataset']
+            or acquired['inputs']['config']['dataset']!=config.dataset):
+        raise ValueError('Full cohort is not bound to the original acquisition')
+    if manifest['dataset']=='ml-100k' and acquired['artifacts'].get('access_evidence')!=file_reference(config.paths['results']/'data_acquisition.json'):
+        raise ValueError('Fallback access evidence is not bound to the original acquisition')
+    bound=load_episode_store(audited['artifacts']['audit']['path'],audited['artifacts']['episodes']['path'])
+    if (bound.audit!=cohort.audit or episode_store_digest(bound)!=episode_store_digest(cohort)
+            or file_reference(cohort.paths['audit'])!=audited['artifacts']['audit']
+            or file_reference(cohort.paths['episodes'])!=audited['artifacts']['episodes']):
+        raise ValueError('Full cohort differs from the verified audited episode store')
 
 
 def select_calibration_users(episodes: list[Episode]) -> list[int]:
@@ -135,16 +179,11 @@ def forecast_scale(measurements: dict, cohort: EpisodeStore, ledger) -> dict:
     if by_family is None:
         raise ValueError('Canonical scoring chunk requires measured costs')
 
+    from .costs import FamilyCost
+    prepared={family:FamilyCost.prepare(observed,family) for family,observed in by_family.items()}
+
     def cost(e, entry, candidate_count=None):
-        observed = by_family[entry.family]
-        h = e.history
-        units = _score_units(entry.family, len(h.positive_ids), len(h.negative_ids),
-                             len(e.candidate_ids) if candidate_count is None else candidate_count,
-                             entry.parameters.get('K', 4))
-        rate = max(r['score_seconds'] / _score_units(entry.family, r['positive_count'],
-                   r['negative_count'], r['candidate_count'], r.get('K', 4)) for r in observed)
-        return (_fit_cost(observed, len(h.positive_ids)+len(h.negative_ids)) + units*rate
-                + max(r['write_seconds'] + r.get('overhead_seconds',0.) for r in observed))
+        return prepared[entry.family].cost(e,entry.family,entry.parameters.get('K',4),candidate_count)
 
     def comparison_cost(e,candidate_count=None,*,geometric_only=False):
         maxima={family:max(cost(e,c,candidate_count) for c in registry if c.family==family) for family in families}
@@ -226,6 +265,7 @@ def forecast_scale(measurements: dict, cohort: EpisodeStore, ledger) -> dict:
             result['stop_reason']='Proposed scoring chunk needs complete valid timing remeasurement'
             return result
         by_family=proposed
+        prepared={family:FamilyCost.prepare(observed,family) for family,observed in by_family.items()}
         dev_cost,conf_cost,timing,numerical,smoke_seconds=reprice()
         result['cost_chunk_size']=result['policy']['score_chunk_size']
     for pair in scales:

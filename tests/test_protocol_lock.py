@@ -11,7 +11,7 @@ from test_stage_pipeline import pipeline, prepare
 
 
 @pytest.fixture
-def frozen_study(pipeline, monkeypatch):
+def ready_to_freeze(pipeline, monkeypatch):
     from signed_study import run, stages, workload
     from signed_study.budget import atomic_write_json
     from signed_study.protocol import canonical_sha256
@@ -40,8 +40,14 @@ def frozen_study(pipeline, monkeypatch):
     development = run.develop(config, ledger)
     assert development['status'] == 'completed'
     monkeypatch.setattr(protocol_lock, 'source_identity', lambda: {'commit':'a'*40, 'tree':'b'*40, 'clean':True, 'content':{'module.py':'c'*64}})
-    lock = run.freeze_protocol(config, development, ledger)
-    return config, ledger, store, lock
+    return config, ledger, store, development
+
+
+@pytest.fixture
+def frozen_study(ready_to_freeze):
+    from signed_study import run
+    config, ledger, store, development = ready_to_freeze
+    return config, ledger, store, run.freeze_protocol(config, development, ledger)
 
 
 def test_freeze_rejects_mutation_before_outcome_access(frozen_study, monkeypatch):
@@ -178,12 +184,16 @@ def full_cohort_schedule(selected,store,config):
 @pytest.mark.parametrize('dataset,counts',[('ml-1m',(418,1776)),('ml-100k',(62,225))])
 @pytest.mark.parametrize('role',['development','confirmation'])
 @pytest.mark.parametrize('fault',['reduced','reordered'])
-def test_results_first_freeze_requires_exact_full_audited_cohort(frozen_study,dataset,counts,role,fault):
+def test_results_first_freeze_requires_exact_full_audited_cohort(frozen_study,monkeypatch,dataset,counts,role,fault):
     from dataclasses import replace
     from types import SimpleNamespace
     from signed_study import protocol_lock, protocol
     from signed_study.calibration import select_calibration_users
     from test_calibration import cohort
+    from signed_study import calibration
+    # This unit exercises membership after the independently tested acquisition
+    # boundary. Full primary/fallback stage integration retains the real proof.
+    monkeypatch.setattr(calibration,'_verify_cohort_binding',lambda *a:None)
     config,ledger,_,lock=frozen_study
     store=cohort(*counts,dataset)
     config=replace(config,dataset=dataset)

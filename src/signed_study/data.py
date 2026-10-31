@@ -68,6 +68,45 @@ class EpisodeStore:
     paths: Mapping[str, Path]
 
 
+@dataclass(frozen=True, slots=True)
+class _VerifiedEpisodeRecords:
+    """A digest attached only after producer/loader validation of frozen records.
+
+    Audit dictionaries and paths are intentionally excluded and remain checked by
+    their consumers. Retaining tuple references binds the digest to this exact
+    store; dataclasses.replace does not transfer this derived state.
+    """
+
+    development: tuple[Episode, ...]
+    confirmation: tuple[Episode, ...]
+    digest: str
+
+
+def _remember_verified_records(store: EpisodeStore, digest: str) -> EpisodeStore:
+    """Cache model-facing identity after full verification, never for public input.
+
+    Frozen dataclasses alone are shallow: require exact tuples of exact frozen
+    records whose leaves are immutable builtins. This is a local application
+    optimization, not a security boundary against deliberate object.__setattr__.
+    """
+    for role in ('development', 'confirmation'):
+        episodes = getattr(store, role)
+        if type(episodes) is not tuple:
+            raise ValueError('Verified episode records must be immutable tuples')
+        for episode in episodes:
+            if type(episode) is not Episode or type(episode.history) is not History:
+                raise ValueError('Verified episode records require frozen History/Episode values')
+            history = episode.history
+            if (type(history.user_id) is not int or type(history.cutoff) is not int
+                    or type(history.role) is not str or history.role != role
+                    or any(type(ids) is not tuple or any(type(i) is not int for i in ids)
+                           for ids in (history.positive_ids, history.negative_ids, episode.candidate_ids))):
+                raise ValueError('Verified episode records require immutable integer identities')
+    object.__setattr__(store, '_verified_records', _VerifiedEpisodeRecords(
+        store.development, store.confirmation, digest))
+    return store
+
+
 @dataclass(frozen=True)
 class _Source:
     url: str
@@ -334,7 +373,16 @@ def _episode_records(store: EpisodeStore) -> dict:
 
 
 def episode_store_digest(store: EpisodeStore) -> str:
-    """Bind stable model-facing records, excluding paths, audits, and labels."""
+    """Bind model-facing records; arbitrary/replaced stores are always revalidated.
+
+    Verified producers attach identity only to structurally immutable records.
+    Outcome bytes, mutable audits and authorization permits are never cached.
+    """
+    context = getattr(store, '_verified_records', None)
+    if (type(context) is _VerifiedEpisodeRecords
+            and context.development is store.development
+            and context.confirmation is store.confirmation):
+        return context.digest
     return canonical_sha256(_episode_records(store))
 
 
@@ -432,7 +480,8 @@ def make_episodes(dataset: Dataset, config: StudyConfig) -> EpisodeStore:
     audit["outputs"] = {"episodes_file_sha256": _sha256(paths["episodes"]), "outcome_sha256": outcomes}
     audit["output_sha256"] = canonical_sha256(audit["outputs"])
     _write_json(paths["audit"], audit)
-    return EpisodeStore(store.development, store.confirmation, audit, MappingProxyType(paths))
+    return _remember_verified_records(
+        EpisodeStore(store.development, store.confirmation, audit, MappingProxyType(paths)), episodes_digest)
 
 
 def _load_outcomes(store: EpisodeStore, user_id: int, role: str) -> np.ndarray:
@@ -490,7 +539,7 @@ def load_episode_store(audit_path: Path, episodes_path: Path) -> EpisodeStore:
         raise ValueError('Episode store digest discrepancy')
     if {e.history.user_id for e in store.development} & {e.history.user_id for e in store.confirmation}:
         raise ValueError('Overlapping outcome roles')
-    return store
+    return _remember_verified_records(store, audit['episodes_sha256'])
 
 
 def load_confirmation_outcomes(store: EpisodeStore, user_id: int, permit: VerifiedProtocol) -> np.ndarray:

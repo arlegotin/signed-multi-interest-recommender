@@ -1,5 +1,6 @@
 """Ordered acquisition, audit, calibration and development-only smoke gates."""
 from dataclasses import asdict, replace
+from datetime import datetime
 import hashlib
 import json
 from pathlib import Path
@@ -34,13 +35,59 @@ def calibration_measurements(config, record):
     return result
 
 
-def _official(manifest):
+def _official(manifest,config=None):
     name=manifest.get('dataset')
     if (name not in SOURCES or manifest.get('status')!='validated'
             or manifest.get('archive_sha256')!=SOURCES[name].sha256):
         raise StageBlocked('Validated official dataset acquisition provenance is required')
+    if config is not None:
+        from .data import _verified_archive
+        _verified_archive(config.paths['data']/'raw'/f'{name}.zip',name)
     if name=='ml-100k' and manifest.get('access_fallback') is not True:
         raise StageBlocked('100K requires the recorded access-only fallback')
+    if name=='ml-100k':
+        from .data import _OFFICIAL_PAGE, _EXPECTED_COUNTS, _verified_archive
+        if config is None or config.dataset!='ml-1m':
+            raise StageBlocked('100K fallback must retain the original 1M invocation')
+        evidence=config.paths['results']/'data_acquisition.json'
+        acquisition=json.loads(evidence.read_text())
+        attempts=acquisition.get('attempts')
+        if (acquisition.get('schema_version')!=1 or not isinstance(attempts,list)
+                or acquisition.get('input_sha256')!=canonical_sha256({n:asdict(s) for n,s in SOURCES.items()})
+                or acquisition.get('output_sha256')!=canonical_sha256({'attempts':attempts})
+                or manifest.get('acquisition_attempts_sha256')!=acquisition['output_sha256']):
+            raise StageBlocked('100K access acquisition evidence digest is invalid')
+        expected=[('primary',SOURCES['ml-1m'].url,{'unavailable'}),
+                  ('primary',SOURCES['ml-1m'].url,{'unavailable'}),
+                  ('official_page',_OFFICIAL_PAGE,{'retrieved','unavailable'})]
+        if len(attempts)==4:
+            expected.append(('fallback',SOURCES['ml-100k'].url,{'retrieved'}))
+        if len(attempts)!=len(expected):
+            raise StageBlocked('100K requires exactly two primary attempts and one official-page access check')
+        for row,(kind,url,statuses) in zip(attempts,expected):
+            if row.get('kind')!=kind or row.get('url')!=url or row.get('status') not in statuses:
+                raise StageBlocked('100K access fallback evidence is incomplete or unauthorized')
+            try:
+                start=datetime.fromisoformat(row['started_at'])
+                end=datetime.fromisoformat(row['ended_at'])
+                if start.tzinfo is None or end.tzinfo is None or end<start:
+                    raise ValueError('invalid access timing')
+            except (ValueError,KeyError,TypeError) as error:
+                raise StageBlocked('100K access fallback evidence requires terminal UTC timestamps') from error
+        files=manifest.get('files',{})
+        counts=manifest.get('counts',{})
+        classes=('positive_ratings','negative_ratings','neutral_ratings')
+        if (set(files)!={'u.data','u.item','u.genre','README'}
+                or not isinstance(counts,dict)
+                or any(counts.get(key)!=value for key,value in _EXPECTED_COUNTS[name].items())
+                or any(type(counts.get(key)) is not int or counts[key]<0 for key in classes)
+                or sum(counts[key] for key in classes)!=counts.get('raw_ratings')
+                or manifest.get('discrepancies')!={}
+                or manifest.get('source_url')!=SOURCES[name].url
+                or manifest.get('archive_bytes')!=SOURCES[name].size
+                or manifest.get('input_sha256')!=SOURCES[name].sha256
+                or manifest.get('output_sha256')!=canonical_sha256({'files':files,'counts':manifest.get('counts')})):
+            raise StageBlocked('100K official archive/schema validation evidence is incomplete')
 
 
 def _read(config,name):
@@ -89,7 +136,7 @@ def _original_correctness(config,ledger,inputs,measured):
     raise StageBlocked('Original calibration G1 evidence is missing')
 
 
-_SCIENTIFIC_FILES=('data.py','embed.py','models.py','metrics.py','protocol.py','workload.py')
+_SCIENTIFIC_FILES=('data.py','embed.py','models.py','metrics.py','protocol.py','workload.py','workload_journal.py')
 
 
 def _scientific_changed(proof,current):
@@ -146,11 +193,17 @@ def _publication_path(config,name,token):
     return path if not path.exists() else path.with_name(f'{name}-{token}.json')
 
 
-def _acquisition_inputs(config):
+def _acquisition_inputs(config,ledger):
     environment=_read(config,'environment.json')
     verify_record(environment)
     if environment.get('target_compatible') is not True or environment.get('blockers'):
         raise StageBlocked('G0 requires verified compatible environment evidence')
+    # A self-checksum establishes internal consistency only. Target admission
+    # also needs the producer's exact successful terminal G0 publication.
+    from .report import inspection_publication
+    if inspection_publication(config.paths['results']/'environment.json',environment,
+                              ledger.snapshot(),require_target=True) is None:
+        raise StageBlocked('G0 inspection lacks its exact completed compatible publication')
     from .run import _PACKAGES
     pins=environment_pins()
     packages=environment.get('packages',{})
@@ -169,7 +222,7 @@ def _acquisition_inputs(config):
 
 
 def _acquired(config,ledger):
-    record=_prerequisite(config,'acquire',ledger,_acquisition_inputs(config))
+    record=_prerequisite(config,'acquire',ledger,_acquisition_inputs(config,ledger))
     resolved=load_config(config.paths['results']/'resolved_config.json')
     verify_environment_lock(Path('requirements.lock.txt'))
     resolved=replace(resolved,prototype=config.prototype,linear_logistic=config.linear_logistic,
@@ -177,7 +230,9 @@ def _acquired(config,ledger):
                      encoder=config.encoder,numerics=config.numerics,timing=config.timing,
                      bootstrap_batch_size=config.bootstrap_batch_size)
     manifest=_read(config,'data_manifest.json')
-    _official(manifest)
+    _official(manifest,config)
+    if manifest['dataset']=='ml-100k' and record['artifacts'].get('access_evidence')!=file_reference(config.paths['results']/'data_acquisition.json'):
+        raise StageBlocked('100K access evidence is not bound to the acquisition receipt')
     encoder=_read(config,'encoder_acquisition.json')
     metadata={row['item_id']:Movie(row['item_id'],row['title'],tuple(row['genres']))
               for row in _read(config,'metadata.json')['movies']}
@@ -188,7 +243,7 @@ def _acquired(config,ledger):
 def _acquire(config,ledger,attempts):
     with ledger.work('G0',0,0) as check:
         attempts.append(check)
-        inputs=_acquisition_inputs(config)
+        inputs=_acquisition_inputs(config,ledger)
         path=config.paths['results']/'stages'/'acquire.json'
         if path.exists():
             return _acquired(config,ledger)[0]
@@ -205,7 +260,7 @@ def _acquire(config,ledger,attempts):
         start=time.perf_counter_ns()
         dataset=load_dataset(config)
         parse_seconds=(time.perf_counter_ns()-start)/1e9
-        _official(dataset.manifest)
+        _official(dataset.manifest,config)
         environment_hash=inputs['environment']['sha256']
         if config.environment_hash not in (None,environment_hash):
             raise StageBlocked('Configured environment identity differs from acquisition evidence')
@@ -222,6 +277,8 @@ def _acquire(config,ledger,attempts):
         files={name:config.paths['results']/name for name in
                ('encoder_acquisition.json','data_manifest.json','resolved_config.json','metadata.json')}
         files['archive']=config.paths['data']/'raw'/f"{dataset.manifest['dataset']}.zip"
+        if dataset.manifest['dataset']=='ml-100k':
+            files['access_evidence']=config.paths['results']/'data_acquisition.json'
         write_environment_lock(Path('requirements.lock.txt'))
         files['environment_lock']=Path('requirements.lock.txt')
         result=save_stage(config,'acquire',inputs,files,attempts,measurements={'parse_validate_seconds':parse_seconds},
@@ -440,17 +497,20 @@ def _saved_calibration(config,ledger,inputs,resolved,store,metadata):
                    or set(r['score_measurements'])!={str(c) for c in chunks}
                    or any(v.get('numerical_accepted') is not True for v in r['score_measurements'].values()) for r in timings)):
         raise StageBlocked('Saved calibration numerical timing coverage is incomplete')
-    journal=workload_path.with_suffix('.jsonl'); completed={}; started=set()
-    for line in journal.read_text().splitlines():
-        event=json.loads(line); verify_record(event)
-        if event.get('input_sha256')!=digest: raise StageBlocked('Saved calibration journal inputs changed')
-        row=event['attempt']; index=row['evaluation_index']
-        if row['status']=='started':
-            if index in started: raise StageBlocked('Duplicate saved calibration journal start')
-            started.add(index)
-        elif row['status']=='completed' and index in started:
-            completed[index]=row
-        else: raise StageBlocked('Saved calibration journal has incomplete or failed work')
+    from .workload_journal import replay_workload_journal
+    journal=workload_path.with_suffix('.jsonl')
+    try:
+        replayed=replay_workload_journal(journal,expected_input_sha256=digest,
+                                         expected_config=config_record(resolved))
+    except ValueError as error:
+        raise StageBlocked(f'Saved calibration journal is invalid: {error}') from error
+    recovered=replayed['measurements']
+    completed={r['evaluation_index']:r for r in recovered['attempts'] if r['status']=='completed'}
+    started={r['evaluation_index'] for r in recovered['attempts']}
+    if replayed['schema_version']==2 and (not replayed['complete'] or recovered!=work):
+        raise StageBlocked('Saved calibration journal final fields differ from completed workload')
+    if replayed['torn_tail_bytes'] or any(r['status']!='completed' for r in recovered['attempts']):
+        raise StageBlocked('Saved calibration journal has incomplete or failed work')
     # Repeated-score write duration is measured after its final durable journal.
     def journal_value(row):
         return {k:v for k,v in row.items() if not (k=='write_seconds' and row['kind']=='score_repeat')}

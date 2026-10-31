@@ -395,3 +395,64 @@ def test_confirmation_permit_rejects_duplicate_membership(ninety_ratings,local_c
     permit=VerifiedProtocol('a'*64,{'data_access':{'confirmation_user_ids':[2,2],
                            'episodes_sha256':episode_store_digest(store)}})
     with pytest.raises(PermissionError): load_confirmation_outcomes(store,2,permit)
+
+
+def test_verified_episode_records_are_hashed_once_without_caching_outcomes(
+        ninety_ratings, local_config, monkeypatch):
+    store = make_episodes(dataset_for(ninety_ratings), local_config)
+    loaded = data.load_episode_store(store.paths['audit'], store.paths['episodes'])
+    calls = []
+    original = data._episode_records
+
+    def count_records(value):
+        calls.append(value)
+        return original(value)
+
+    monkeypatch.setattr(data, '_episode_records', count_records)
+    for verified in (store, loaded):
+        for _ in range(3):
+            np.testing.assert_array_equal(load_development_outcomes(verified, 1), [1, 0] * 9)
+    assert calls == []
+    # Cached record identity never substitutes for checking the actual label file.
+    np.save(store.paths['development_outcomes'] / '1.npy', np.zeros(18, dtype=np.int8), allow_pickle=False)
+    with pytest.raises(ValueError, match='hash|integrity'):
+        load_development_outcomes(loaded, 1)
+
+
+def test_replaced_and_unvalidated_episode_records_rehash(ninety_ratings, local_config, monkeypatch):
+    store = make_episodes(dataset_for(ninety_ratings), local_config)
+    episode, = store.development
+    changed = replace(store, development=(replace(episode, candidate_ids=episode.candidate_ids[::-1]),))
+    with pytest.raises(ValueError, match='digest'):
+        load_development_outcomes(changed, 1)
+    # Public callers may supply shallow-frozen records containing mutable lists.
+    candidates = list(episode.candidate_ids)
+    unvalidated = replace(store, development=(replace(episode, candidate_ids=candidates),))
+    before = episode_store_digest(unvalidated)
+    candidates.reverse()
+    assert episode_store_digest(unvalidated) != before
+    with pytest.raises(ValueError, match='digest'):
+        load_development_outcomes(unvalidated, 1)
+
+
+def test_cached_episode_context_keeps_audit_and_confirmation_bindings_live(
+        ninety_ratings, local_config, monkeypatch):
+    store = make_episodes(dataset_for(tuple(replace(r, user_id=u) for u in (1, 2)
+                                            for r in ninety_ratings)), local_config)
+    opened = []
+    original = data.np.load
+
+    def count_load(*args, **kwargs):
+        opened.append(args[0])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(data.np, 'load', count_load)
+    wrong = VerifiedProtocol('a' * 64, {'data_access': {
+        'confirmation_user_ids': [2], 'episodes_sha256': '0' * 64}})
+    with pytest.raises(PermissionError):
+        load_confirmation_outcomes(store, 2, wrong)
+    assert opened == []
+    store.audit['episodes_sha256'] = '0' * 64
+    with pytest.raises(ValueError, match='digest'):
+        load_development_outcomes(store, 1)
+    assert opened == []

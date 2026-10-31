@@ -9,6 +9,7 @@ import json
 import math
 import re
 import os
+import tempfile
 from pathlib import Path
 from statistics import fmean
 
@@ -18,7 +19,12 @@ from .protocol import ProtocolMismatch, canonical_sha256, config_from_record, lo
 from .stage_evidence import file_reference, verify_record, verify_reference, stage_path
 
 
-def report_config(root):
+def report_config(root, *, config_path=None):
+    """Read saved configuration or an explicit/check-out fallback.
+
+    Wheels support saved-evidence reports and explicit configuration. Source-bound
+    freeze/confirmation still require their original Git checkout and identities.
+    """
     root=Path(root)
     lock=root/'protocol.lock.json'
     config=None
@@ -28,7 +34,11 @@ def report_config(root):
     except (ValueError,OSError,KeyError,TypeError):
         # Broken evidence must still permit a scoped report and ledger costs.
         pass
-    if config is None: config=load_config(Path(__file__).resolve().parents[2]/'config/study.json')
+    if config is None:
+        fallback=Path(config_path) if config_path is not None else Path(__file__).resolve().parents[2]/'config/study.json'
+        if not fallback.is_file():
+            raise ValueError('Reporting requires saved configuration, config_path=..., or a source checkout containing config/study.json')
+        config=load_config(fallback)
     return replace(config,paths={**config.paths,'results':root})
 
 
@@ -41,6 +51,36 @@ def _table(path,fields,rows):
 
 def _json(value):
     return json.dumps(value,sort_keys=True,ensure_ascii=True,allow_nan=False)
+
+
+def inspection_publication(path,environment,state,*,require_target=False):
+    """Return a terminal G0 owner for this exact inspection artifact.
+
+    Relative references keep their established current-working-directory
+    meaning. Only path spelling is normalized; an identical file elsewhere
+    cannot authenticate this artifact. A blocked producer may publish retained
+    inspection evidence, but never establish successful target eligibility.
+    """
+    path=Path(path).resolve()
+    reference=file_reference(path)
+    compatible=environment.get('target_compatible') is True and not environment.get('blockers')
+    blocked=environment.get('target_compatible') is False and bool(environment.get('blockers'))
+    for aid,attempt in state.get('attempts',{}).items():
+        published=attempt.get('outputs',{}).get('environment')
+        if (attempt.get('stage')!='G0' or attempt.get('event')!='finish' or not published
+                or published.get('sha256')!=reference['sha256']
+                or Path(published.get('path','')).resolve()!=path):
+            continue
+        eligible=attempt.get('status')=='completed' and compatible
+        retained=attempt.get('status')=='blocked' and blocked
+        if eligible or retained and not require_target:
+            # This role already requires the same resolved path. Verify bytes
+            # without requiring its stored spelling to equal Path.__str__.
+            # The general reference verifier deliberately remains unchanged.
+            if file_reference(Path(published['path']))['sha256']!=published['sha256']:
+                raise ValueError('Inspection publication digest differs')
+            return dict(attempt_id=aid,reference=published)
+    return None
 
 
 def _outcome(saved,invalid,resource_limited,delta):
@@ -309,18 +349,21 @@ def _actual_work(root,ledger,payload,stage_records,problems,state):
     return result
 
 
-def render_report(results_directory: Path) -> dict:
+def _render_report(results_directory: Path,output_directory: Path) -> dict:
     """Render all ten report sections and safe aggregates, including early stops.
 
     No fits, encoding, downloads, new inference or private outcome-array access.
     Missing/invalid files remain explicit; no stage is run to complete them.
     """
-    root=Path(results_directory).resolve(); root.mkdir(parents=True,exist_ok=True)
+    root=Path(results_directory).resolve(); output=Path(output_directory).resolve()
+    root.mkdir(parents=True,exist_ok=True)
     problems=[]; inventory=[]; stage_rows=[]; saved=None; diagnostic=None; payload={}; invalid=False
     qualifications=[]; failed_records=[];stage_records=[]
     config=None; state={}; ledger=None
     def note(path,status,**extra):
-        row={'name':str(Path(path).resolve().relative_to(root)),'status':status,**extra}
+        resolved=Path(path).resolve()
+        relative=resolved.relative_to(output) if resolved.is_relative_to(output) else resolved.relative_to(root)
+        row={'name':str(relative),'status':status,**extra}
         if Path(path).is_file(): row['sha256']=file_reference(path)['sha256']
         inventory.append(row)
     try:
@@ -341,7 +384,7 @@ def render_report(results_directory: Path) -> dict:
             note(path,'invalid');problems.append(f'{path.name}: {error}');return None
     environment=read(root/'environment.json') or {}
     environment_ref=file_reference(root/'environment.json') if environment else None
-    environment_bound=bool(environment_ref and any(a.get('outputs',{}).get('environment')==environment_ref for a in attempts.values()))
+    environment_bound=bool(environment_ref and inspection_publication(root/'environment.json',environment,state))
     if environment and not environment_bound:
         problems.append('Inspection metadata is self-checksummed but lacks matching external ledger publication; hardware is unverified historical metadata')
     artifacts={};effective_stages={}
@@ -479,17 +522,17 @@ def render_report(results_directory: Path) -> dict:
     rows=[dict(comparator=name,**_aggregate(value)) for name,value in comparisons.items()]
     tables=[]
     if rows:
-        tables.append(_table(root/'comparisons.csv',['comparator',*list(_aggregate({}))],
+        tables.append(_table(output/'comparisons.csv',['comparator',*list(_aggregate({}))],
                              [{**row,'complete_case':_json(row['complete_case'])} for row in rows]))
     cost_rows=[dict(stage=stage,seconds=seconds,limit_seconds=state.get('stage_limits',{}).get(stage),
                     failed_seconds=sum(a['elapsed_seconds'] for a in attempts.values() if a['stage']==stage and a['status']!='completed'))
                for stage,seconds in state.get('stage_seconds',{}).items()]
     cost_rows.append(dict(stage='setup',seconds=state.get('setup_seconds',0),limit_seconds=2700,
                           failed_seconds=sum(a['elapsed_seconds'] for a in attempts.values() if a['stage']=='setup' and a['status']!='completed')))
-    tables.append(_table(root/'costs.csv',['stage','seconds','limit_seconds','failed_seconds'],cost_rows))
+    tables.append(_table(output/'costs.csv',['stage','seconds','limit_seconds','failed_seconds'],cost_rows))
     repair_summaries=_repair_summaries(state,problems)
     actual_work=_actual_work(root,ledger,payload,stage_records,problems,state)
-    tables.append(_table(root/'actual-work.csv',['work','reserved','attempted','completed','failed','unfinished','unavailable','pilot_attempted','status','evidence'],actual_work))
+    tables.append(_table(output/'actual-work.csv',['work','reserved','attempted','completed','failed','unfinished','unavailable','pilot_attempted','status','evidence'],actual_work))
     metric_rows=[]
     if saved and saved.get('attempts'):
         from .metrics import METRIC_KEYS
@@ -500,8 +543,8 @@ def render_report(results_directory: Path) -> dict:
                     n_scheduled=len(saved['scheduled_user_ids']),
                     **{k:fmean(r['metrics'][k] for r in completed if k in r['metrics'])
                        if any(k in r['metrics'] for r in completed) else None for k in METRIC_KEYS}))
-        if metric_rows: tables.append(_table(root/'metrics.csv',['method','n_completed','n_scheduled',*METRIC_KEYS],metric_rows))
-    figures=_figures(root,comparisons)
+        if metric_rows: tables.append(_table(output/'metrics.csv',['method','n_completed','n_scheduled',*METRIC_KEYS],metric_rows))
+    figures=_figures(output,comparisons)
     fitting_costs={}
     for row in calibration.get('user_measurements',[]):
         family=row.get('family','unknown')
@@ -517,7 +560,7 @@ def render_report(results_directory: Path) -> dict:
     # longer supports them; an old benchmark must not survive an early stop.
     current={Path(p).name for p in [*tables,*figures]}
     for name in ('comparisons.csv','metrics.csv','paired-intervals.png','paired-differences.png'):
-        if name not in current: (root/name).unlink(missing_ok=True)
+        if name not in current: (output/name).unlink(missing_ok=True)
     lines=['# Signed multi-interest recommendation study','',
         '## 1. Question, outcome and recommendation',
         'Does signed multi-interest ranking improve observed-rating user AUC over the frozen development-selected comparator by delta=0.01?',
@@ -609,9 +652,78 @@ def render_report(results_directory: Path) -> dict:
         'Unresolved: mechanism attribution, wider representation/data coverage, online utility and any missing/invalid evidence identified above.',
         'Next step: '+('resolve the recorded validity failure before comparative interpretation.' if outcome=='invalid experiment' else 'assess the frozen evidence limitations before deciding whether any further study is warranted.'),
         'Local raw evidence stays in ignored results/data/cache directories. Public exports contain aggregates and artifact hashes only; they exclude outcomes, raw MovieLens content, vectors, candidate IDs and per-item scores. See README for recreation and license boundaries.','']
-    report_path=root/'report.md';report_path.write_text('\n\n'.join(lines),encoding='utf-8')
+    report_path=output/'report.md';report_path.write_text('\n\n'.join(lines),encoding='utf-8')
     for path in [report_path,*map(Path,tables),*map(Path,figures)]: note(path,'generated aggregate export')
-    inventory_path=root/'artifact-inventory.json'
+    inventory_path=output/'artifact-inventory.json'
     inventory_path.write_text(_json(dict(schema_version=1,validation='historical saved evidence; no outcome permit',artifacts=inventory))+'\n')
     if ledger: ledger.close()
     return dict(status='completed',outcome=outcome,report=str(report_path),tables=tables,figures=figures,inventory=str(inventory_path),limitations=problems)
+
+
+def verify_report_publication(root):
+    """Verify a prior selector before replacing an existing aggregate bundle.
+
+    Legacy reports have no selector. New selectors bind report/inventory bytes;
+    an optional native receipt additionally requires its exact terminal owner.
+    Source inventory entries are historical snapshots and are not revalidated
+    as current files (the permanent ledger legitimately advances).
+    """
+    root=Path(root).resolve();selector=root/'report.active.json'
+    if not selector.exists():return
+    selected=json.loads(selector.read_text());verify_record(selected)
+    for name,key in (('report.md','report_sha256'),('artifact-inventory.json','inventory_sha256')):
+        if file_reference(root/name)['sha256']!=selected.get(key):
+            raise ValueError('Prior report selector differs from its published artifact')
+    inventory=json.loads((root/'artifact-inventory.json').read_text())
+    for row in inventory['artifacts']:
+        if row['status']!='generated aggregate export':continue
+        path=(root/row['name']).resolve()
+        if not path.is_relative_to(root) or file_reference(path)['sha256']!=row.get('sha256'):
+            raise ValueError('Prior report inventory differs from a generated export')
+    reference=selected.get('receipt')
+    if reference:
+        path=Path(reference['path']).resolve()
+        if path.parent!=root/'operator_logs':raise ValueError('Native report receipt outside publication scope')
+        verify_reference(reference)
+        receipt=json.loads(path.read_text());verify_record(receipt)
+        ledger=Ledger(root/'budget_ledger.jsonl',report_config(root))
+        try:owner=ledger.snapshot()['attempts'].get(receipt['ledger_attempt_id'],{})
+        finally:ledger.close()
+        if (owner.get('event')!='finish' or owner.get('stage')!='G6' or owner.get('status')!='completed'
+                or owner.get('outputs',{}).get('results_first_packaging')!=reference):
+            raise ValueError('Native report selector lacks completed receipt ownership')
+
+
+def render_report(results_directory: Path) -> dict:
+    """Validate prospective aggregates before recoverable bundle publication.
+
+    Reporting reads saved evidence only. A rendering/validation/replacement
+    failure preserves the last complete report and its inventory byte for byte.
+    Library publication does not attest that a CLI accounting owner completed.
+    """
+    from .publication import publish_files,recover_publication
+    root=Path(results_directory).resolve();root.mkdir(parents=True,exist_ok=True)
+    if (root/'.results-first.publication.json').exists():
+        raise ValueError('Interrupted native packaging requires recovery with its original --results, --docs and ledger')
+    recover_publication(root,'report')
+    verify_report_publication(root)
+    with tempfile.TemporaryDirectory(prefix='.report-stage-',dir=root) as directory:
+        output=Path(directory)
+        result=_render_report(root,output)
+        paths=[Path(result['report']),Path(result['inventory']),*map(Path,result['tables']),*map(Path,result['figures'])]
+        inventory=json.loads(Path(result['inventory']).read_text())
+        for row in inventory['artifacts']:
+            if row['status']=='generated aggregate export':
+                if file_reference(output/row['name'])['sha256']!=row['sha256']:
+                    raise ValueError('Prospective report inventory differs from staged export')
+        files={root/path.name:path for path in paths}
+        for name in ('comparisons.csv','metrics.csv','paired-intervals.png','paired-differences.png'):
+            if root/name not in files and (root/name).exists():files[root/name]=None
+        selector=dict(schema_version=1,inventory_sha256=file_reference(output/'artifact-inventory.json')['sha256'],
+                      report_sha256=file_reference(output/'report.md')['sha256'],
+                      qualification='validated library aggregate publication; no terminal CLI owner attested')
+        selector['output_sha256']=canonical_sha256(selector)
+        publish_files(root,'report',files,root/'report.active.json',selector)
+        for key in ('report','inventory'):result[key]=str(root/Path(result[key]).name)
+        for key in ('tables','figures'):result[key]=[str(root/Path(path).name) for path in result[key]]
+        return result

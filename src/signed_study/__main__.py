@@ -118,7 +118,8 @@ def main(argv=None):
                 config=config_from_record(payload['invocation_config'])
             ledger=Ledger(config.paths['results']/'budget_ledger.jsonl',config)
             if args.command=='freeze':
-                development=json.loads((config.paths['results']/'stages'/'develop.json').read_text())
+                from .stage_evidence import read_stage
+                development=read_stage(config,'develop')
                 path=freeze_protocol(config,development,ledger)
                 result=dict(status='completed',lock=str(path),lock_sha256=read_lock(path)[0])
             elif args.command=='confirm':

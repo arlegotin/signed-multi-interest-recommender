@@ -32,6 +32,11 @@ def pipeline(embedding_inputs, monkeypatch, tmp_path):
     raw=config.paths['data']/'raw'/'ml-1m.zip'
     raw.parent.mkdir(parents=True,exist_ok=True)
     raw.write_bytes(b'injected acquisition bytes; parsing boundary supplies synthetic records')
+    # The parser boundary is synthetic; explicitly replace the pinned source
+    # digest/size too, so downstream production checks still verify real bytes.
+    monkeypatch.setitem(stages.SOURCES,'ml-1m',replace(stages.SOURCES['ml-1m'],
+        sha256=hashlib.sha256(raw.read_bytes()).hexdigest(),size=raw.stat().st_size))
+    manifest['archive_sha256']=stages.SOURCES['ml-1m'].sha256
     dataset = Dataset((), metadata, manifest)
     store = cohort()
     root = config.paths['data']/'derived'/'fixture'
@@ -58,6 +63,12 @@ def pipeline(embedding_inputs, monkeypatch, tmp_path):
                    'packages':{n:importlib.metadata.version(n) for n in run._PACKAGES}}
     environment['output_sha256'] = canonical_sha256(environment)
     atomic_write_json(config.paths['results']/'environment.json',environment)
+    # This synthetic inspection is explicit test evidence, with the same
+    # terminal ownership contract as the real inspect producer. It makes no
+    # assertion about this test host's hardware or production eligibility.
+    with ledger.work('G0',0,0) as inspection:
+        ledger.finish(inspection,'completed',{},
+            {'environment':evidence.file_reference(config.paths['results']/'environment.json')})
     monkeypatch.setattr(stages, 'acquire_archive', lambda c: None)
     monkeypatch.setattr(stages, 'load_dataset', lambda c: dataset)
     monkeypatch.setattr(stages, 'resolve_encoder', lambda c: embedding_inputs['encoder_provenance'])
@@ -231,6 +242,53 @@ def test_acquisition_pins_environment_and_reuses_immutable_model(pipeline,monkey
     assert stages.run_stage('acquire',config,ledger)['status']=='completed'
     Path('requirements.lock.txt').write_text('changed==1\n')
     assert stages.run_stage('audit',config,ledger)['status']=='blocked'
+
+
+@pytest.mark.parametrize('owner',['unowned','failed','interrupted','blocked','wrong_stage','wrong_digest','other_path'])
+def test_acquisition_rejects_inspection_without_exact_successful_owner(pipeline,owner):
+    config,ledger,_,_,_,stages,evidence,_=pipeline
+    path=config.paths['results']/'environment.json'
+    environment=json.loads(path.read_text())
+    environment.pop('output_sha256');environment['fixture_revision']='new inspection'
+    environment['output_sha256']=canonical_sha256(environment);atomic_write_json(path,environment)
+    reference=evidence.file_reference(path)
+    if owner=='other_path':
+        other=path.with_name('same-content-inspection.json');other.write_bytes(path.read_bytes())
+        reference=evidence.file_reference(other)
+    if owner=='wrong_digest':reference['sha256']='0'*64
+    if owner!='unowned':
+        with ledger.work('G1' if owner=='wrong_stage' else 'G0',0,0) as aid:
+            status=owner if owner in ('failed','interrupted','blocked') else 'completed'
+            ledger.finish(aid,status,{}, {'environment':reference})
+    result=stages.run_stage('acquire',config,ledger)
+    assert result['status']=='blocked',result
+    assert 'publication' in result['stop_reason']
+    assert ledger.snapshot()['attempted_evaluations']==0
+
+
+def test_unfinished_inspection_never_confers_acquisition_eligibility(pipeline):
+    config,ledger,_,_,_,stages,_,_=pipeline
+    path=config.paths['results']/'environment.json'
+    environment=json.loads(path.read_text());environment.pop('output_sha256')
+    environment['fixture_revision']='unfinished inspection'
+    environment['output_sha256']=canonical_sha256(environment);atomic_write_json(path,environment)
+    with ledger.work('G0',0,0):
+        with pytest.raises(ValueError,match='publication'):
+            stages._acquisition_inputs(config,ledger)
+
+
+@pytest.mark.parametrize('spelling',['relative','absolute','dotted'])
+def test_acquisition_accepts_equivalent_exact_g0_inspection_reference(pipeline,spelling):
+    config,ledger,_,_,_,stages,evidence,_=pipeline
+    path=config.paths['results']/'environment.json'
+    environment=json.loads(path.read_text());environment.pop('output_sha256')
+    environment['fixture_revision']=spelling
+    environment['output_sha256']=canonical_sha256(environment);atomic_write_json(path,environment)
+    reference=evidence.file_reference(path)
+    reference['path']=(str(path.resolve()) if spelling=='absolute' else
+                       './'+str(path) if spelling=='dotted' else str(path))
+    with ledger.work('G0',0,0) as aid:ledger.finish(aid,'completed',{}, {'environment':reference})
+    assert stages.run_stage('acquire',config,ledger)['status']=='completed'
 
 
 def test_recorded_global_policy_reuses_acquisition_and_applies_to_every_fit(pipeline,monkeypatch):

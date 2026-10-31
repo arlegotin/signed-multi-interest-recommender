@@ -2,7 +2,10 @@
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from dataclasses import asdict, replace
+import hashlib
 
+import numpy as np
 import pytest
 
 from signed_study.budget import BudgetExceeded, atomic_write_json
@@ -11,12 +14,291 @@ from signed_study.stage_evidence import file_reference
 from test_budget_transfers import transfer_case
 from test_calibration import cohort, measured
 from test_stage_pipeline import pipeline, prepare
-from test_protocol_lock import frozen_study, full_cohort_schedule
+from test_protocol_lock import frozen_study, full_cohort_schedule, ready_to_freeze
 
 
 def adopt(ledger):
     assert hasattr(ledger, 'adopt_results_first'), 'durable results-first adoption is missing'
     return ledger.adopt_results_first('User authorized completion of scientific results on 31 October')
+
+
+def test_cli_freeze_uses_superseded_development_receipt(ready_to_freeze, monkeypatch, capsys):
+    from signed_study import __main__ as cli, budget, protocol, protocol_lock
+    from signed_study.stage_evidence import read_stage, save_stage, stage_path
+    config, ledger, _, _ = ready_to_freeze
+    original = file_reference(stage_path(config, 'develop'))
+    old = read_stage(config, 'develop')
+    with ledger.work('G3', 0, 0) as aid:
+        current = save_stage(config, 'develop', old['inputs'],
+            {k:Path(v['path']) for k,v in old['artifacts'].items()}, [aid],
+            supersedes=original, complete_suite_eligible=True, confirmation_outcomes_accessed=False)
+    monkeypatch.setattr(protocol, 'load_config', lambda p:config)
+    monkeypatch.setattr(budget, 'Ledger', lambda *a,**kw:ledger)
+    assert cli.main(['freeze']) == 0
+    result = json.loads(capsys.readouterr().out)
+    _, lock = protocol_lock.read_lock(Path(result['lock']))
+    assert lock['identities']['artifacts']['stage_develop'] == file_reference(stage_path(config, 'develop'))
+    assert lock['identities']['artifacts']['stage_develop'] != original
+    assert current['supersedes'] == original
+    assert file_reference(original['path']) == original
+
+
+@pytest.mark.parametrize('damage', ['deleted', 'stale', 'corrupt'])
+def test_committed_supersession_selector_fails_closed(pipeline, damage):
+    from signed_study.stage_evidence import read_stage, save_stage, stage_path
+    config, ledger, *_ = pipeline
+    with ledger.work('G3', 0, 0) as aid:
+        save_stage(config, 'smoke', {}, {}, [aid])
+    previous = file_reference(stage_path(config, 'smoke'))
+    with ledger.work('G3', 0, 0) as aid:
+        save_stage(config, 'smoke', {'revision':2}, {}, [aid], supersedes=previous)
+    selector = config.paths['results']/'stages'/'smoke.active.json'
+    if damage == 'deleted': selector.unlink()
+    elif damage == 'corrupt': selector.write_text('{}')
+    else:
+        value = {'schema_version':1, 'stage':'smoke', 'receipt':previous}
+        value['output_sha256'] = canonical_sha256(value)
+        atomic_write_json(selector, value)
+    with pytest.raises(ValueError, match='selector|selection|receipt|digest|reference'):
+        read_stage(config, 'smoke')
+    assert file_reference(previous['path']) == previous
+
+
+def test_orphaned_receipt_does_not_supersede_legacy(pipeline, monkeypatch):
+    from signed_study import stage_evidence as evidence
+    config, ledger, *_ = pipeline
+    with ledger.work('G3', 0, 0) as aid:
+        original = evidence.save_stage(config, 'smoke', {}, {}, [aid])
+    previous = file_reference(evidence.stage_path(config, 'smoke'))
+    write = evidence.atomic_write_json
+    def interrupted(path, value):
+        if Path(path).name == 'smoke.active.json':
+            raise OSError('injected selector failure')
+        return write(path, value)
+    monkeypatch.setattr(evidence, 'atomic_write_json', interrupted)
+    with pytest.raises(OSError, match='selector failure'):
+        with ledger.work('G3', 0, 0) as aid:
+            evidence.save_stage(config, 'smoke', {'revision':2}, {}, [aid], supersedes=previous)
+    with pytest.warns(RuntimeWarning, match='interrupted'):
+        assert evidence.read_stage(config, 'smoke') == original
+    assert file_reference(previous['path']) == previous
+
+
+@pytest.fixture
+def access_fallback_pipeline(pipeline, monkeypatch):
+    """Inject only archive parsing/encoding; keep stage, hashes and ledger real.
+
+    A tiny local archive stands in for pinned bytes via an explicit source-table
+    test double. No production package or hardware evidence is manufactured.
+    """
+    import numpy as np
+    from signed_study import data
+    from signed_study.data import Dataset, EpisodeStore, Movie, episode_store_digest
+    config, ledger, clock, resources, events, stages, evidence, _ = pipeline
+    raw = config.paths['data']/'raw'/'ml-100k.zip'
+    raw.write_bytes(b'synthetic official-parser boundary')
+    monkeypatch.setitem(data.SOURCES, 'ml-100k', replace(data.SOURCES['ml-100k'],
+        sha256=hashlib.sha256(raw.read_bytes()).hexdigest(), size=raw.stat().st_size))
+    attempts = [dict(kind=kind, url=url, status=status,
+        started_at='2026-10-31T00:00:00+00:00', ended_at='2026-10-31T00:00:01+00:00')
+        for kind,url,status in [('primary',data.SOURCES['ml-1m'].url,'unavailable'),
+            ('primary',data.SOURCES['ml-1m'].url,'unavailable'),
+            ('official_page',data._OFFICIAL_PAGE,'retrieved'),
+            ('fallback',data.SOURCES['ml-100k'].url,'retrieved')]]
+    acquisition = dict(schema_version=1,attempts=attempts,
+        input_sha256=canonical_sha256({name:asdict(source) for name,source in data.SOURCES.items()}),
+        output_sha256=canonical_sha256({'attempts':attempts}))
+    atomic_write_json(config.paths['results']/'data_acquisition.json', acquisition)
+    files = {name:dict(sha256=hashlib.sha256(name.encode()).hexdigest(),bytes=len(name))
+             for name in ('u.data','u.item','u.genre','README')}
+    manifest = dict(schema_version=1,dataset='ml-100k',status='validated',access_fallback=True,
+        archive_sha256=data.SOURCES['ml-100k'].sha256, archive_bytes=raw.stat().st_size,
+        source_url=data.SOURCES['ml-100k'].url, files=files,
+        counts={**data._EXPECTED_COUNTS['ml-100k'],'positive_ratings':55000,'negative_ratings':18000,'neutral_ratings':27000},
+        discrepancies={}, input_sha256=data.SOURCES['ml-100k'].sha256,
+        acquisition_attempts_sha256=acquisition['output_sha256'])
+    manifest['output_sha256'] = canonical_sha256({'files':files,'counts':manifest['counts']})
+    metadata = {i:Movie(i,f'Movie {i}',('Drama',)) for i in range(256)}
+    dataset = Dataset((),metadata,manifest)
+    initial = cohort(62,225,'ml-100k')
+    root = config.paths['data']/'derived'/'fallback-fixture'
+    paths = {'audit':config.paths['results']/'cohort_audit.json','episodes':root/'episodes.json',
+        **{role+'_outcomes':root/'outcomes'/role for role in ('development','confirmation')}}
+    audit = dict(schema_version=1,dataset='ml-100k',status='validated',input_sha256='a'*64)
+    store = EpisodeStore(initial.development,initial.confirmation,audit,paths)
+    audit['episodes_sha256'] = episode_store_digest(store)
+    records = {'schema_version':1, **{role:[asdict(e) for e in sorted(getattr(store,role),key=lambda e:e.history.user_id)]
+        for role in ('development','confirmation')}}
+    atomic_write_json(paths['episodes'],{**records,'input_sha256':'a'*64,'output_sha256':audit['episodes_sha256']})
+    outcomes = {'development':{},'confirmation':{}}
+    for role in outcomes:
+        paths[role+'_outcomes'].mkdir(parents=True,exist_ok=True)
+        for episode in getattr(store,role):
+            path = paths[role+'_outcomes']/f'{episode.history.user_id}.npy'
+            np.save(path,np.arange(len(episode.candidate_ids),dtype=np.int8)%2)
+            outcomes[role][str(episode.history.user_id)] = hashlib.sha256(path.read_bytes()).hexdigest()
+    audit['outputs'] = dict(episodes_file_sha256=hashlib.sha256(paths['episodes'].read_bytes()).hexdigest(),outcome_sha256=outcomes)
+    audit['output_sha256'] = canonical_sha256(audit['outputs'])
+    atomic_write_json(paths['audit'],audit)
+    monkeypatch.setattr(stages,'load_dataset',lambda c:dataset)
+    monkeypatch.setattr(stages,'make_episodes',lambda d,c:store)
+    return config,ledger,clock,resources,events,stages,evidence,store
+
+
+def test_authorized_access_fallback_full_cohort_reaches_freeze(access_fallback_pipeline, monkeypatch, capsys):
+    from signed_study import __main__ as cli, budget, protocol, protocol_lock, workload
+    config, ledger, _, _, _, stages, _, store = access_fallback_pipeline
+    prepare(access_fallback_pipeline)
+    adopt(ledger)
+    calibrated = stages.run_stage('calibrate',config,ledger)
+    assert calibrated['status'] == 'completed', calibrated
+    assert calibrated['forecast']['scale'] == [62,225]
+    monkeypatch.setattr(stages,'measure_users',workload.measure_users)
+    assert stages.run_stage('smoke',config,ledger)['status'] == 'completed'
+    developed = stages.run_stage('develop',config,ledger)
+    assert developed['status'] == 'completed', developed
+    monkeypatch.setattr(protocol_lock,'source_identity',lambda:dict(commit='a'*40,tree='b'*40,clean=True,content={'module.py':'c'*64}))
+    monkeypatch.setattr(protocol,'load_config',lambda p:config)
+    monkeypatch.setattr(budget,'Ledger',lambda *a,**kw:ledger)
+    assert cli.main(['freeze']) == 0
+    _, payload = protocol_lock.read_lock(Path(json.loads(capsys.readouterr().out)['lock']))
+    assert payload['invocation_config']['dataset'] == 'ml-1m'
+    assert payload['config']['dataset'] == 'ml-1m'
+    assert len(payload['development']['development_user_ids']) == len(store.development) == 62
+    assert len(payload['data_access']['confirmation_user_ids']) == len(store.confirmation) == 225
+    assert payload['identities']['artifacts']['stage_acquire']['sha256']
+
+
+@pytest.mark.parametrize('damage', ['primary_count','primary_status','page_url','page_status','digest','archive','schema','unbound',
+    'rating_total','negative_class_count','fractional_class_count','missing_class_count'])
+def test_access_fallback_rejects_invalid_access_or_archive_evidence(access_fallback_pipeline, damage):
+    config, ledger, _, _, _, stages, _, _ = access_fallback_pipeline
+    path = config.paths['results']/'data_acquisition.json'
+    value = json.loads(path.read_text())
+    if damage == 'primary_count': value['attempts'].pop(0)
+    elif damage == 'primary_status': value['attempts'][0]['status'] = 'retrieved'
+    elif damage == 'page_url': value['attempts'][2]['url'] = 'https://example.test/unofficial'
+    elif damage == 'page_status': value['attempts'][2]['status'] = 'started'
+    elif damage == 'digest': value['output_sha256'] = 'f'*64
+    elif damage == 'archive': (config.paths['data']/'raw'/'ml-100k.zip').write_bytes(b'changed')
+    elif damage == 'schema':
+        dataset = stages.load_dataset(config)
+        dataset.manifest['files'].pop('u.genre')
+    elif damage in ('rating_total','negative_class_count','fractional_class_count','missing_class_count'):
+        manifest = stages.load_dataset(config).manifest
+        if damage=='rating_total': manifest['counts']['positive_ratings'] += 1
+        elif damage=='negative_class_count': manifest['counts']['negative_ratings'] = -1
+        elif damage=='fractional_class_count': manifest['counts']['neutral_ratings'] = 27000.5
+        else: manifest['counts'].pop('neutral_ratings')
+        manifest['output_sha256'] = canonical_sha256({'files':manifest['files'],'counts':manifest['counts']})
+    else: path.unlink()
+    if damage not in ('unbound','archive','schema','rating_total','negative_class_count','fractional_class_count','missing_class_count'):
+        if damage!='digest':
+            value['output_sha256'] = canonical_sha256({'attempts':value['attempts']})
+            stages.load_dataset(config).manifest['acquisition_attempts_sha256'] = value['output_sha256']
+        atomic_write_json(path,value)
+    result = stages.run_stage('acquire',config,ledger)
+    assert result['status'] == 'blocked', result
+
+
+def test_access_fallback_accepts_full_real_parser_count_schema(access_fallback_pipeline):
+    config,ledger,_,_,_,stages,_,_ = access_fallback_pipeline
+    counts = stages.load_dataset(config).manifest['counts']
+    assert len(counts)==7
+    assert sum(counts[key] for key in ('positive_ratings','negative_ratings','neutral_ratings'))==100000
+    result=stages.run_stage('acquire',config,ledger)
+    assert result['status']=='completed',result
+
+
+@pytest.mark.parametrize('damage', ['truncated','reordered','duplicate','foreign','bool','episodes','audit','failed_owner'])
+def test_fallback_full_cohort_membership_and_binding_fail_closed(access_fallback_pipeline, monkeypatch, damage):
+    from signed_study.calibration import require_full_cohort, user_digest
+    config, ledger, _, _, _, stages, _, store = access_fallback_pipeline
+    assert stages.run_stage('acquire',config,ledger)['status'] == 'completed'
+    assert stages.run_stage('audit',config,ledger)['status'] == 'completed'
+    adopt(ledger)
+    planned = {role:sorted([e.history.user_id for e in getattr(store,role)],key=user_digest)
+               for role in ('development','confirmation')}
+    # No full-cohort authorization or binding check may expose outcome arrays.
+    import numpy as np
+    monkeypatch.setattr(np,'load',lambda *a,**kw:pytest.fail('fallback validation opened outcomes'))
+    state = ledger.snapshot()
+    require_full_cohort(config,store,planned,state)
+    if damage == 'truncated': planned['development'].pop()
+    elif damage == 'reordered': planned['confirmation'].reverse()
+    elif damage == 'duplicate': planned['development'][0] = planned['development'][1]
+    elif damage == 'foreign': planned['confirmation'][0] = 999999
+    elif damage == 'bool': planned['development'][planned['development'].index(1)] = True
+    elif damage == 'episodes':
+        episode = store.development[0]
+        changed = replace(episode, candidate_ids=(*episode.candidate_ids,255))
+        store = replace(store,development=(changed,*store.development[1:]))
+    elif damage == 'audit': store.audit['input_sha256'] = 'f'*64
+    else:
+        from signed_study.stage_evidence import read_stage
+        acquired = read_stage(config,'acquire')
+        state['attempts'][acquired['attempt_ids'][-1]]['status'] = 'failed'
+    with pytest.raises(ValueError): require_full_cohort(config,store,planned,state)
+
+
+def test_legacy_completed_supersession_without_witness_cannot_reactivate_old_receipt(pipeline):
+    from signed_study.stage_evidence import save_stage, read_stage, stage_path
+    config, ledger, *_ = pipeline
+    with ledger.work('G3',0,0) as aid: save_stage(config,'smoke',{}, {},[aid])
+    previous = file_reference(stage_path(config,'smoke'))
+    with ledger.work('G3',0,0) as aid:
+        save_stage(config,'smoke',{'revision':2},{},[aid],supersedes=previous)
+    root = config.paths['results']/'stages'
+    # Historical supersession did not have the new selection witness. Its
+    # replacement + completed ledger attempts still prove that legacy is stale.
+    (root/'smoke.selection.json').unlink()
+    (root/'smoke.active.json').unlink()
+    with pytest.raises(ValueError,match='missing active selector'): read_stage(config,'smoke')
+
+
+@pytest.mark.parametrize('damage', ['unbound','foreign','invocation','archive','audit_receipt'])
+def test_primary_full_cohort_requires_bound_acquisition_and_episodes(pipeline, damage):
+    from signed_study.calibration import require_full_cohort, user_digest
+    config, ledger, _, _, _, stages, _, store = pipeline
+    assert stages.run_stage('acquire',config,ledger)['status'] == 'completed'
+    assert stages.run_stage('audit',config,ledger)['status'] == 'completed'
+    adopt(ledger)
+    planned = {role:sorted([e.history.user_id for e in getattr(store,role)],key=user_digest)
+               for role in ('development','confirmation')}
+    require_full_cohort(config,store,planned,ledger.snapshot())
+    if damage == 'unbound': store = replace(store,paths={})
+    elif damage == 'foreign':
+        first = store.development[0]
+        foreign = replace(first,history=replace(first.history,user_id=999999))
+        store = replace(store,development=(foreign,*store.development[1:]))
+        planned['development'] = sorted([e.history.user_id for e in store.development],key=user_digest)
+    elif damage == 'invocation': config = replace(config,dataset='ml-100k')
+    elif damage == 'archive': (config.paths['data']/'raw'/'ml-1m.zip').write_bytes(b'other same-name archive')
+    else:
+        path = config.paths['results']/'stages'/'audit.json'
+        record = json.loads(path.read_text())
+        record['inputs']['acquire'] = 'f'*64
+        record['input_sha256'] = canonical_sha256(record['inputs'])
+        record.pop('output_sha256')
+        record['output_sha256'] = canonical_sha256(record)
+        atomic_write_json(path,record)
+    with pytest.raises(ValueError): require_full_cohort(config,store,planned,ledger.snapshot())
+
+
+def test_historical_stale_selector_rejects_completed_successor(pipeline):
+    from signed_study.stage_evidence import save_stage, read_stage, stage_path
+    config, ledger, *_ = pipeline
+    root = config.paths['results']/'stages'
+    with ledger.work('G3',0,0) as aid: save_stage(config,'smoke',{}, {},[aid])
+    with ledger.work('G3',0,0) as aid:
+        save_stage(config,'smoke',{'revision':2},{},[aid],supersedes=file_reference(stage_path(config,'smoke')))
+    prior = (root/'smoke.active.json').read_bytes()
+    with ledger.work('G3',0,0) as aid:
+        save_stage(config,'smoke',{'revision':3},{},[aid],supersedes=file_reference(stage_path(config,'smoke')))
+    (root/'smoke.selection.json').unlink()
+    (root/'smoke.active.json').write_bytes(prior)
+    with pytest.raises(ValueError,match='stale.*selector|selector.*stale'):
+        read_stage(config,'smoke')
 
 
 def test_policy_preserves_history_and_is_durable_idempotent(transfer_case):
@@ -149,10 +431,19 @@ def saved_calibration(pipeline, monkeypatch, *, numerical_ok=True):
                     score_seconds=.0001, write_seconds=.0001, overhead_seconds=0.,
                     diagnostics={'status':'ok'}, score_measurements=timings))
                 for chunk in [512, *[c for c in chunks if c != 512]]:
+                    # Model the complete historical journal schema. The reader
+                    # must reject missing final score/timing evidence, even in
+                    # a synthetic adoption fixture.
+                    from signed_study.metrics import evaluate_user
+                    scores=np.zeros(len(ep.candidate_ids),dtype=np.float64)
+                    metrics=evaluate_user(scores,np.arange(len(scores),dtype=np.int8)%2,ep.candidate_ids)
                     row = dict(evaluation_index=len(result['attempts']), user_id=uid,
                                configuration_id=entry.id, family=entry.family, parameters=entry.parameters,
                                chunk_size=chunk, kind='fit_and_score' if chunk==512 else 'score_repeat',
-                               status='completed', diagnostics={'status':'ok'}, accepted=numerical_ok)
+                               status='completed', diagnostics={'status':'ok'}, accepted=numerical_ok,
+                               score_seconds=.0001,write_seconds=.0001,scores=scores.tolist(),
+                               candidate_ids=list(ep.candidate_ids),metrics=metrics)
+                    if chunk==512:row['fit_seconds']=.0001
                     result['attempts'].append(row)
         result['actual_evaluations'] = len(result['attempts'])
         digest = canonical_sha256(inputs)

@@ -62,34 +62,12 @@ def choose_families(rows):
     return choices,sorted(missing)
 
 
-def projected_cost(episodes, entries, measurements, config, *, exact_parameters=False):
-    """Empirical upper-envelope pricing, using the actual canonical chunk.
-
-    Endpoint and selected solver costs require their actual measured parameters.
-    """
-    total=0.
-    for entry in entries:
-        rows=[r for r in measurements if r['family']==entry.family]
-        if exact_parameters and entry.family in ('LinearLogistic','RBFSVM'):
-            rows=[r for r in rows if r.get('parameters')==entry.parameters]
-        chunk=config.numerics['score_chunk_size']
-        priced=[]
-        for row in rows:
-            timing=row if row.get('chunk_size')==chunk else row.get('score_measurements',{}).get(str(chunk))
-            if timing is None or (timing is not row and not timing.get('numerical_accepted')):
-                raise ValueError('Missing measured canonical scoring chunk cost')
-            value={**row,**{k:timing.get(k,0.) for k in ('score_seconds','write_seconds','overhead_seconds')}}
-            if any(not math.isfinite(value[k]) or value[k]<0 for k in ('fit_seconds','score_seconds','write_seconds','overhead_seconds')):
-                raise ValueError('Invalid measured development cost')
-            priced.append(value)
-        if not priced:
-            raise ValueError('No measured cost for required family')
-        for e in episodes:
-            h=e.history
-            units=_score_units(entry.family,len(h.positive_ids),len(h.negative_ids),len(e.candidate_ids),entry.parameters.get('K',4))
-            rate=max(r['score_seconds']/_score_units(entry.family,r['positive_count'],r['negative_count'],r['candidate_count'],r.get('K',4)) for r in priced)
-            total+=_fit_cost(priced,len(h.positive_ids)+len(h.negative_ids))+units*rate+max(r['write_seconds']+r['overhead_seconds'] for r in priced)
-    return total
+def projected_cost(episodes, entries, measurements, config, *, exact_parameters=False, prepared=None):
+    """Price exact timing inputs using a local prepared empirical envelope."""
+    from .costs import PreparedCosts
+    prepared = (PreparedCosts(measurements, chunk_size=config.numerics['score_chunk_size'])
+                if prepared is None else prepared)
+    return prepared.total(episodes, entries, exact_parameters=exact_parameters)
 
 
 def _selection_record(row, config):
@@ -129,6 +107,8 @@ def _boundary_coverage(choices,rows,config):
 
 def refresh_selected_forecast(result,store,timings,config,ledger,calibration):
     """Price the concrete thirteen slots, including timing and geometric checks."""
+    from .costs import PreparedCosts
+    prepared=PreparedCosts(timings,chunk_size=config.numerics['score_chunk_size'])
     schedule=result['comparison_schedule']
     entries=[model_configuration(s['fit_family'],s['parameters']) for s in schedule]
     confirmation={e.history.user_id:e for e in store.confirmation}
@@ -142,9 +122,9 @@ def refresh_selected_forecast(result,store,timings,config,ledger,calibration):
     numerical=planned[:64]
     repeats=config.timing['warmups']+config.timing['repetitions']
     geometric=[entry for entry,slot in zip(entries,schedule) if slot['geometric']]
-    seconds={'G4':projected_cost(planned,entries,timings,config,exact_parameters=True),
-             'G5':repeats*projected_cost(timing_episodes,entries,timings,config,exact_parameters=True)
-                  +projected_cost(numerical,geometric,timings,config,exact_parameters=True)+2}
+    seconds={'G4':projected_cost(planned,entries,timings,config,exact_parameters=True,prepared=prepared),
+             'G5':repeats*projected_cost(timing_episodes,entries,timings,config,exact_parameters=True,prepared=prepared)
+                  +projected_cost(numerical,geometric,timings,config,exact_parameters=True,prepared=prepared)+2}
     evaluations={'G4':len(planned)*len(entries),
                  'G5':len(timing_users)*len(entries)*repeats+len(numerical)*len(geometric)}
     state=ledger.snapshot(); caps=config.resources; margin=caps['safety_multiplier']
@@ -166,7 +146,7 @@ def refresh_selected_forecast(result,store,timings,config,ledger,calibration):
     contamination=dict(user_ids=[e.history.user_id for e in contamination_users],
         seeds=list(config.contamination_seeds),schedule=contamination_schedule,
         seconds=len(config.contamination_seeds)*projected_cost(contamination_users,
-            [model_configuration(s['fit_family'],s['parameters']) for s in contamination_schedule],timings,config,exact_parameters=True),
+            [model_configuration(s['fit_family'],s['parameters']) for s in contamination_schedule],timings,config,exact_parameters=True,prepared=prepared),
         evaluations=len(contamination_users)*len(config.contamination_seeds)*len(contamination_schedule),
         applicability=APPLICABILITY,minimum_subgroup_users=100,numerical_auc_threshold=config.delta,
         planned_sample_counts=dict(contamination_users=len(contamination_users),numerical_users=len(numerical),timing_users=len(timing_users)),
@@ -188,6 +168,8 @@ def endpoint_campaign_forecast(cohort, entries, requests, timings, store, calibr
     parameters. The maximizers may differ by stage; this remains conservative
     without learning an endpoint winner from outcomes.
     """
+    from .costs import PreparedCosts
+    prepared=PreparedCosts(timings,chunk_size=config.numerics['score_chunk_size'])
     candidates=list(entries)+list(requests)
     for entry in list(candidates):
         if entry.family=='SignedMax':
@@ -204,7 +186,7 @@ def endpoint_campaign_forecast(cohort, entries, requests, timings, store, calibr
         raise ValueError('Endpoint campaign requires measured catalog cardinality')
     timing_episodes=[replace(development[u],candidate_ids=tuple(range(catalog))) for u in timing_users]
     def bound(episodes,geometric=False):
-        maxima={family:max(projected_cost(episodes,[entry],timings,config,exact_parameters=True)
+        maxima={family:max(projected_cost(episodes,[entry],timings,config,exact_parameters=True,prepared=prepared)
                            for entry in candidates if entry.family==family)
                 for family in {slot['fit_family'] for slot in schedule if not geometric or slot['geometric']}}
         return sum(maxima[slot['fit_family']] for slot in schedule if not geometric or slot['geometric'])

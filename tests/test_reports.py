@@ -158,6 +158,46 @@ def test_report_early_stops(local_config, blocker):
     assert not result['figures'] and len(result['tables'])==2  # cost/actual-work tables only
 
 
+@pytest.mark.parametrize('status,stage,relative,other_path,wrong_digest,verified', [
+    ('completed','G0',True,False,False,True),
+    ('completed','G0','dotted',False,False,True),
+    ('completed','G0','parent',False,False,True),
+    ('blocked','G0',True,False,False,True),
+    ('failed','G0',False,False,False,False),
+    ('interrupted','G0',False,False,False,False),
+    ('completed','G1',False,False,False,False),
+    ('completed','G0',False,True,False,False),
+    ('completed','G0',False,False,True,False),
+])
+def test_inspection_publication_uses_exact_artifact_and_terminal_owner(
+        local_config,status,stage,relative,other_path,wrong_digest,verified):
+    from signed_study import report
+    from signed_study.budget import Ledger
+    from signed_study.stage_evidence import file_reference
+    root=local_config.paths['results'].resolve();root.mkdir(exist_ok=True)
+    path=root/'environment.json'
+    save(path,dict(target_compatible=status!='blocked',blockers=['non-target machine'] if status=='blocked' else [],hardware={'chip':'fixture'}))
+    publication=path
+    if other_path:
+        publication=root/'same-content.json';publication.write_bytes(path.read_bytes())
+    reference=file_reference(publication)
+    if relative:
+        reference['path']=str(publication.relative_to(Path.cwd()))
+        if relative=='dotted':reference['path']='./'+reference['path']
+        if relative=='parent':reference['path']='results/../'+reference['path']
+    if wrong_digest: reference['sha256']='0'*64
+    sample=dict(rss_bytes=1,installed_ram_bytes=64*2**30,available_memory_bytes=8*2**30,project_disk_bytes=1,free_disk_bytes=20*2**30)
+    ledger=Ledger(root/'budget_ledger.jsonl',local_config,clock=lambda:0.,sampler=lambda:sample,monitor=False)
+    with ledger.work(stage,0,0) as owner:
+        ledger.finish(owner,status,{}, {'environment':reference})
+    ledger.close()
+    rendered=report.render_report(root)
+    text=Path(rendered['report']).read_text()
+    assert ('Hardware (saved inspection; ledger publication verified)' in text)==verified
+    if status=='blocked':
+        assert 'non-target machine' in text and rendered['outcome']=='inconclusive evidence'
+
+
 def test_historical_reader_is_nonmutating_and_checks_anchor(saved_evidence, monkeypatch):
     from signed_study import confirmation, protocol_lock
     from signed_study.protocol import ProtocolMismatch

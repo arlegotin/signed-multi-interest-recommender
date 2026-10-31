@@ -3,8 +3,10 @@ import argparse
 import csv
 import hashlib
 import json
+import math
 import shutil
 import os
+import tempfile
 from pathlib import Path
 from statistics import fmean
 
@@ -13,7 +15,8 @@ import numpy as np
 from signed_study import confirmation, diagnostics, protocol_lock
 from signed_study.budget import Ledger, atomic_write_json
 from signed_study.protocol import canonical_sha256
-from signed_study.report import report_config
+from signed_study.publication import publish_files, recover_publication
+from signed_study.report import report_config, inspection_publication, verify_report_publication, _actual_work
 from signed_study.stage_evidence import file_reference, stage_path, verify_record, verify_reference
 
 
@@ -116,14 +119,24 @@ def build(root, ledger):
     conditions_ref = anchors[0]
     verify_reference(conditions_ref)
     environment_path = root / 'environment.json'
-    environment_hash = file_reference(environment_path)['sha256']
-    environment_anchors = [(aid, a['outputs']['environment']) for aid,a in state['attempts'].items()
-        if a.get('status') == 'completed' and a.get('stage') == 'G0' and a.get('outputs', {}).get('environment')
-        and a['outputs']['environment']['sha256'] == environment_hash
-        and Path(a['outputs']['environment']['path']).resolve() == environment_path.resolve()]
-    if len(environment_anchors) != 1:
-        raise ValueError('Inspection requires one exact completed G0 publication')
-    verify_reference(environment_anchors[0][1])
+    environment=json.loads(environment_path.read_text());verify_record(environment)
+    environment_owner=inspection_publication(environment_path,environment,state,require_target=True)
+    if environment_owner is None:
+        raise ValueError('Inspection requires completed compatible G0 publication')
+    work_records=[]
+    for stage in ('calibrate','smoke','develop'):
+        record=json.loads(stage_path(config,stage).read_text())
+        seen=set()
+        while True:
+            verify_record(record)
+            if record['output_sha256'] in seen:raise ValueError('Cyclic work receipt chain')
+            seen.add(record['output_sha256']);work_records.append((stage,record))
+            previous=record.get('supersedes')
+            if not previous:break
+            record=checked(previous)
+    work_problems=[]
+    actual_work=_actual_work(root,ledger,payload,work_records,work_problems,state)
+    if work_problems:raise ValueError('Bound work evidence invalid: '+'; '.join(work_problems))
     return dict(schema_version=1, lock_sha256=digest,
         source=payload['identities']['source'], execution_policy=payload['identities']['execution_policy'],
         correctness_sha256=payload['identities']['correctness_sha256'],
@@ -150,7 +163,10 @@ def build(root, ledger):
         contamination_by_seed={seed:{name:effect(row) for name,row in comparisons.items()}
                                for seed,comparisons in contamination.get('paired_by_seed', {}).items()},
         operating_conditions_reference=conditions_ref,
-        environment_publication=dict(attempt_id=environment_anchors[0][0], reference=environment_anchors[0][1]),
+        environment_publication=environment_owner,
+        actual_work=actual_work,
+        comparison_diagnostics={name:{key:row.get('complete_case',{}).get(key)
+            for key in ('mean_difference','standard_error','n_users')} for name,row in saved['comparisons'].items()},
         operating_conditions={key:conditions[key] for key in ('captured_at', 'commands', 'load_average', 'system_cpu_percent_one_second')},
         cumulative_stage_seconds=state['stage_seconds'], setup_seconds=state['setup_seconds'],
         attempted_evaluations=state['attempted_evaluations'], resource_extrema=extrema,
@@ -203,32 +219,76 @@ def summary_snapshot(root, ledger):
     for key in STABLE_KEYS:
         if saved[key] != current[key]:
             raise ValueError(f'Saved scientific summary differs from current bound evidence: {key}')
-    return saved, reference
+    # Historical summary bytes stay fixed. Work counts and comparison metadata
+    # are independently rebound to their saved evidence for export validation.
+    return dict(saved,actual_work=current['actual_work'],
+                comparison_diagnostics=current['comparison_diagnostics']), reference
 
 
 def verify_csvs(root, summary):
-    metrics = list(csv.DictReader((root / 'metrics.csv').open()))
-    comparisons = list(csv.DictReader((root / 'comparisons.csv').open()))
-    if len(metrics) != 13 or len(comparisons) != 12:
-        raise ValueError('Expected all thirteen frozen slots and twelve paired comparisons')
+    """Require exact exported identities and values from bound saved evidence."""
+    def rows(name,fields,identity,expected):
+        with (root/name).open(newline='',encoding='utf-8') as handle:
+            reader=csv.DictReader(handle)
+            if reader.fieldnames!=fields:raise ValueError(f'{name}: unexpected CSV schema')
+            values=list(reader)
+        ids=[row[identity] for row in values]
+        if len(ids)!=len(set(ids)) or set(ids)!=set(expected):
+            raise ValueError(f'{name}: duplicate, missing or extra {identity} identities')
+        if any(None in row or any(v is None for v in row.values()) for row in values):
+            raise ValueError(f'{name}: malformed CSV row')
+        return values
+    def same_number(value,expected,*,integer=False):
+        if expected is None:
+            if value!='':raise ValueError('Unavailable export value must remain unavailable')
+            return
+        try:number=int(value) if integer else float(value)
+        except (ValueError,TypeError) as error:raise ValueError('Invalid exported number') from error
+        if not math.isfinite(number) or number!=expected or integer and (number<0 or str(number)!=value):
+            raise ValueError('Exported numeric value differs from bound finite evidence')
+    metrics=rows('metrics.csv',['method','n_completed','n_scheduled','auc','ndcg10','negative_at_10','tie_fraction'],
+                 'method',summary['metric_means'])
+    comparisons=rows('comparisons.csv',['comparator','sample_mean_low','sample_mean_high','low','high',
+                    'n_users','n_complete','n_missing','standard_error','complete_case'],'comparator',summary['comparisons'])
     for row in metrics:
         expected = summary['metric_means'][row['method']]
-        if int(row['n_completed']) != expected['n_complete'] or int(row['n_scheduled']) != expected['n_scheduled']:
-            raise ValueError('Metric coverage differs from saved evidence')
+        same_number(row['n_completed'],expected['n_complete'],integer=True)
+        same_number(row['n_scheduled'],expected['n_scheduled'],integer=True)
         for key in ('auc', 'ndcg10', 'negative_at_10', 'tie_fraction'):
-            if float(row[key]) != expected[key]:
-                raise ValueError('Metric export differs from saved evidence')
+            same_number(row[key],expected[key])
     for row in comparisons:
         expected = summary['comparisons'][row['comparator']]
         for key in ('sample_mean_low', 'sample_mean_high', 'low', 'high', 'standard_error'):
-            if float(row[key]) != expected[key]:
-                raise ValueError('Paired export differs from saved evidence')
+            same_number(row[key],expected[key])
         for key in ('n_users', 'n_complete', 'n_missing'):
-            if int(row[key]) != expected[key]:
-                raise ValueError('Paired export coverage differs from saved evidence')
-    work = list(csv.DictReader((root / 'actual-work.csv').open()))
-    if sum(int(row['attempted']) for row in work) != summary['attempted_evaluations']:
-        raise ValueError('Count export differs from permanent accounting')
+            same_number(row[key],expected[key],integer=True)
+        diagnostic=json.loads(row['complete_case'])
+        if set(diagnostic)!={'label','mean_difference','standard_error','n_users'} or diagnostic['label']!='complete_case_diagnostic':
+            raise ValueError('Invalid paired complete-case metadata')
+        bound=summary.get('comparison_diagnostics',{}).get(row['comparator'])
+        if bound is None:
+            if expected['n_missing']!=0:raise ValueError('Missing bound complete-case metadata')
+            bound=dict(mean_difference=expected['sample_mean_low'],standard_error=expected['standard_error'],n_users=expected['n_complete'])
+        for key,value in bound.items():
+            if diagnostic[key]!=value or value is not None and not math.isfinite(value):
+                raise ValueError('Paired complete-case metadata differs from saved evidence')
+    bound_work=summary.get('actual_work')
+    if bound_work is None:raise ValueError('Actual work export requires independently bound work evidence')
+    expected_work={row['work']:row for row in bound_work}
+    if len(expected_work)!=len(bound_work):raise ValueError('Duplicate bound work identities')
+    fields=['work','reserved','attempted','completed','failed','unfinished','unavailable','pilot_attempted','status','evidence']
+    work=rows('actual-work.csv',fields,'work',expected_work)
+    for row in work:
+        expected=expected_work[row['work']]
+        for key in fields[1:8]:same_number(row[key],expected[key],integer=True)
+        if any(row[key]!=expected[key] for key in ('status','evidence')):
+            raise ValueError('Work status/evidence differs from saved evidence')
+        total=expected['attempted'];counts=[expected[key] for key in ('completed','failed','unfinished')]
+        if (total is not None and all(v is not None for v in counts)
+                and (sum(counts)>total or expected['status']=='available' and sum(counts)!=total)):
+            raise ValueError('Impossible actual-work terminal counters')
+        if expected['pilot_attempted'] is not None and (total is None or expected['pilot_attempted']>total):
+            raise ValueError('Pilot attempts must be an actual-work subset')
     return metrics, comparisons
 
 
@@ -357,76 +417,124 @@ def report_addendum(root, summary):
     ]
     path = root / 'report.md'
     text = path.read_text().split(ADDENDUM, 1)[0]
-    text = text.replace(
-        'Inspection metadata is self-checksummed but lacks matching external ledger publication; hardware is unverified historical metadata',
-        'Inspection publication verified by independently resolved original G0 path/hash; hardware values remain historical metadata')
-    text = text.replace('Hardware (saved inspection; not externally verified):',
-                        'Hardware (saved inspection; original G0 publication independently verified):')
     path.write_text(text.rstrip()+ADDENDUM+'\n\n'.join(lines)+'\n')
 
 
 def package(root, docs, ledger, attempt_id):
+    """Validate prospective exports, then publish one recoverable saved bundle.
+
+    A durable bundle retains new files and prior projections. The selector is
+    updated only after every replacement; success additionally requires the
+    exact completed G6 receipt owner. Interrupted selection is rolled back on
+    the next invocation unless that owner durably completed. No scientific
+    stages or inference are performed here.
+    """
+    root=Path(root).resolve();docs=Path(docs).resolve()
+    recover_publication(root,'report')
+    recover_publication(root,'results-first',ledger=ledger,allowed_roots=[root,docs])
+    verify_report_publication(root)
     summary, summary_ref = summary_snapshot(root, ledger)
-    _, comparisons = verify_csvs(root, summary)
-    outputs = public_exports(root, docs, comparisons)
-    report_addendum(root, summary)
-    science_paths = [root / name for name in (
-        'comparisons.csv', 'metrics.csv', 'actual-work.csv',
-        'paired-intervals.png', 'paired-differences.png')]+outputs
-    hashes = {str(path.relative_to(root.parent)):file_reference(path)['sha256'] for path in science_paths}
     pointer_path = root / 'results-first-reproduction.json'
-    repeated = False
+    previous=None
+    state=ledger.snapshot() if ledger is not None else dict(events=[],attempts={})
+    published=[event['outputs']['results_first_packaging'] for event in state['events']
+        if event.get('event')=='finish' and state['attempts'][event['attempt_id']]['stage']=='G6'
+        and event.get('status')=='completed' and event.get('outputs',{}).get('results_first_packaging')]
     if pointer_path.exists():
         pointer = json.loads(pointer_path.read_text());verify_record(pointer)
+        if published and pointer['receipt']!=published[-1]:
+            raise ValueError('Stale native packaging selector; preserve receipts and recover explicitly')
         previous = checked(pointer['receipt']);verify_record(previous)
         previous_owner = ledger.snapshot()['attempts'][previous['ledger_attempt_id']]
-        if (previous_owner['status'] != 'completed'
+        if (previous_owner.get('event')!='finish' or previous_owner.get('stage')!='G6'
+                or previous_owner['status'] != 'completed'
                 or previous_owner.get('outputs', {}).get('results_first_packaging') != pointer['receipt']):
             raise ValueError('Previous packaging receipt lacks its completed publication')
-        if previous['scientific_hashes'] != hashes:
+        verify_reference(previous['inventory_snapshot'])
+        if previous['native_summary']!=summary_ref:raise ValueError('Previous packaging uses different saved evidence')
+        # Validate preservation before running any renderer or changing a file.
+        for name,digest in previous['scientific_hashes'].items():
+            path=root.parent/name
+            if not any(path.resolve().is_relative_to(scope) for scope in (root,docs)):
+                raise ValueError('Previous scientific export path outside declared scope')
+            if file_reference(path)['sha256']!=digest:raise ValueError('Prior scientific export changed')
+    elif published:
+        raise ValueError('Missing native packaging selector for completed publication; recover explicitly')
+    _, comparisons = verify_csvs(root, summary)
+    with tempfile.TemporaryDirectory(prefix='.results-first-stage-',dir=root.parent) as directory:
+        staging=Path(directory);staged_root=staging/'results';staged_docs=staging/'docs'
+        staged_root.mkdir();staged_docs.mkdir()
+        names=('comparisons.csv','metrics.csv','actual-work.csv','paired-intervals.png',
+               'paired-differences.png','report.md','artifact-inventory.json')
+        for name in names:shutil.copyfile(root/name,staged_root/name)
+        outputs=public_exports(staged_root,staged_docs,comparisons)
+        report_addendum(staged_root,summary)
+        verify_csvs(staged_root,summary)
+        files={root/name:staged_root/name for name in names}
+        files.update({docs/path.relative_to(staged_docs):path for path in outputs})
+        science_paths=[root/name for name in names[:5]]+[docs/path.relative_to(staged_docs) for path in outputs]
+        def key(path):return str(path.relative_to(root.parent)) if path.is_relative_to(root.parent) else str(path)
+        hashes={key(path):file_reference(files[path])['sha256'] for path in science_paths}
+        if previous is not None and previous['scientific_hashes']!=hashes:
             raise ValueError('Repeated packaging changed a scientific export')
-        repeated = True
-    script_ref = file_reference(Path(__file__).resolve())
-    ledger_prefix = ledger.path.read_bytes()
-    prefix = dict(byte_length=len(ledger_prefix), sha256=hashlib.sha256(ledger_prefix).hexdigest())
-    inventory_path = root / 'artifact-inventory.json'
-    inventory = json.loads(inventory_path.read_text())
-    for row in inventory['artifacts']:
-        if row['name'] == 'report.md':
-            row['sha256'] = file_reference(root / 'report.md')['sha256']
-    inventory['results_first_packaging'] = dict(script=script_ref, recipe=RECIPE,
-        native_summary=summary_ref, ledger_prefix=prefix, scientific_hashes=hashes,
-        inspection_qualification=summary['environment_publication'])
-    atomic_write_json(inventory_path, inventory)
-    inventory_snapshot = root / 'operator_logs' / f'results-first-inventory-{attempt_id}.json'
-    shutil.copyfile(inventory_path, inventory_snapshot)
-    receipt = dict(schema_version=1, ledger_attempt_id=attempt_id,
-        native_summary=summary_ref, script=script_ref, recipe=RECIPE,
-        ledger_prefix=prefix, scientific_hashes=hashes,
-        repeated_scientific_hashes_equal=repeated,
-        inventory_snapshot=file_reference(inventory_snapshot),
-        report_sha256=file_reference(root / 'report.md')['sha256'],
-        interpretation='saved-evidence packaging only; no new experiment or bootstrap inference')
-    receipt['output_sha256'] = canonical_sha256(receipt)
-    receipt_path = root / 'operator_logs' / f'results-first-packaging-{attempt_id}.json'
-    atomic_write_json(receipt_path, receipt)
-    pointer = dict(schema_version=1, receipt=file_reference(receipt_path))
-    pointer['output_sha256'] = canonical_sha256(pointer)
-    atomic_write_json(pointer_path, pointer)
-    ledger.finish(attempt_id, 'completed', {}, {'results_first_packaging':file_reference(receipt_path)})
+        repeated=previous is not None
+        script_ref=file_reference(Path(__file__).resolve())
+        ledger_prefix=ledger.path.read_bytes()
+        prefix=dict(byte_length=len(ledger_prefix),sha256=hashlib.sha256(ledger_prefix).hexdigest())
+        inventory_path=root/'artifact-inventory.json'
+        inventory=json.loads((staged_root/inventory_path.name).read_text())
+        for row in inventory['artifacts']:
+            if row['name']=='report.md':row['sha256']=file_reference(staged_root/'report.md')['sha256']
+        inventory['results_first_packaging']=dict(script=script_ref,recipe=RECIPE,native_summary=summary_ref,
+            ledger_prefix=prefix,scientific_hashes=hashes,inspection_qualification=summary['environment_publication'])
+        atomic_write_json(staged_root/inventory_path.name,inventory)
+        inventory_snapshot=root/'operator_logs'/f'results-first-inventory-{attempt_id}.json'
+        files[inventory_snapshot]=staged_root/inventory_path.name
+        def final_reference(source,target):return dict(path=str(target),sha256=file_reference(source)['sha256'])
+        receipt=dict(schema_version=1,ledger_attempt_id=attempt_id,native_summary=summary_ref,
+            script=script_ref,recipe=RECIPE,ledger_prefix=prefix,scientific_hashes=hashes,
+            repeated_scientific_hashes_equal=repeated,
+            inventory_snapshot=final_reference(files[inventory_snapshot],inventory_snapshot),
+            report_sha256=file_reference(staged_root/'report.md')['sha256'],
+            interpretation='saved-evidence packaging only; no new experiment or bootstrap inference')
+        receipt['output_sha256']=canonical_sha256(receipt)
+        staged_receipt=staged_root/'receipt.json';atomic_write_json(staged_receipt,receipt)
+        receipt_path=root/'operator_logs'/f'results-first-packaging-{attempt_id}.json'
+        files[receipt_path]=staged_receipt
+        reference=final_reference(staged_receipt,receipt_path)
+        pointer=dict(schema_version=1,receipt=reference)
+        pointer['output_sha256']=canonical_sha256(pointer)
+        report_selector=dict(schema_version=1,report_sha256=receipt['report_sha256'],
+            inventory_sha256=file_reference(staged_root/'artifact-inventory.json')['sha256'],
+            receipt=reference,qualification='saved native packaging; exact completed G6 owner required')
+        report_selector['output_sha256']=canonical_sha256(report_selector)
+        staged_selector=staged_root/'report.active.json';atomic_write_json(staged_selector,report_selector)
+        files[root/'report.active.json']=staged_selector
+        publish_files(root,'results-first',files,pointer_path,pointer,ledger=ledger,owner=attempt_id,
+                      outputs={'results_first_packaging':reference},allowed_roots=[root,docs])
     return dict(status='completed', receipt=str(receipt_path), report=str(root / 'report.md'),
                 repeated_scientific_hashes_equal=repeated, scientific_hashes=hashes)
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--results', default='results')
     parser.add_argument('--docs', default='docs')
-    args = parser.parse_args()
+    parser.add_argument('--recover-only',action='store_true',
+                        help='Restore/project a pending validated bundle without admitting or completing new G6 work')
+    args = parser.parse_args(argv)
     root = Path(args.results).resolve()
     docs = Path(args.docs).resolve()
     ledger = Ledger(root / 'budget_ledger.jsonl', report_config(root))
     try:
+        if args.recover_only:
+            report_state=recover_publication(root,'report')
+            publication_state=recover_publication(root,'results-first',ledger=ledger,allowed_roots=[root,docs])
+            verify_report_publication(root)
+            print(json.dumps(dict(status='recovered',publication_state=publication_state or 'nothing_pending',
+                report_state=report_state or 'nothing_pending',
+                qualification='Bundle recovery only; interrupted ledger owners remain unfinished; no scientific work executed'),sort_keys=True))
+            return
         with ledger.work('G6', 1, 0) as attempt_id:
             result = package(root, docs, ledger, attempt_id)
         print(json.dumps(result, sort_keys=True))

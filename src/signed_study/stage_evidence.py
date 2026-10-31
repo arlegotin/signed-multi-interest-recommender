@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import sys
 import uuid
+import warnings
 
 from .budget import atomic_write_json
 from .protocol import canonical_sha256
@@ -142,18 +143,88 @@ def verify_record(record):
 _SUPERSEDABLE_STAGES=('calibrate','smoke','develop')
 
 
+def _receipt_reference(root,stage,reference,*,legacy=False):
+    path=Path(reference['path'])
+    if (path.parent.resolve()!=root.resolve() or path.suffix!='.json' or
+            not (path.name.startswith(stage+'-') or legacy and path.name==stage+'.json')):
+        raise ValueError('Invalid pre-freeze active receipt reference')
+    verify_reference(reference)
+    record=json.loads(path.read_text()); verify_record(record)
+    if record.get('stage')!=stage:
+        raise ValueError('Pre-freeze receipt stage identity mismatch')
+    return path
+
+
+def _completed_legacy_supersession(config,stage,*,supersedes=None):
+    """Detect old completed replacements, never select one by filename or time.
+
+    Before selection witnesses existed, successful terminal accounting plus the
+    replacement's own attempt IDs is the durable evidence of supersession.
+    Orphaned records without completed accounting do not supersede anything.
+    """
+    candidates=[]
+    for path in (config.paths['results']/'stages').glob(stage+'-*.json'):
+        row=json.loads(path.read_text())
+        if (row.get('stage')==stage and row.get('status')=='completed' and row.get('supersedes') is not None
+                and (supersedes is None or row['supersedes']==supersedes)):
+            verify_record(row)
+            candidates.append(row)
+    ledger=config.paths['results']/'budget_ledger.jsonl'
+    if not candidates:
+        return False
+    if not ledger.exists():
+        warnings.warn('Receipt replacement interrupted before selection; retaining the previous publication',RuntimeWarning)
+        return False
+    terminal={}
+    for line in ledger.read_text().splitlines():
+        row=json.loads(line)
+        if row.get('event')=='finish':
+            terminal[row['attempt_id']]=row['status']
+    completed=any(row.get('attempt_ids') and all(terminal.get(a)=='completed'
+                  for a in row['attempt_ids']) for row in candidates)
+    if not completed:
+        warnings.warn('Receipt replacement interrupted before selection; retaining the previous publication',RuntimeWarning)
+    return completed
+
+
 def stage_path(config,stage):
     """Resolve only the three mutable pre-freeze receipt roles, with hash checks."""
     root=config.paths['results']/'stages'
     selector=root/f'{stage}.active.json'
+    selection=root/f'{stage}.selection.json'
+    if stage in _SUPERSEDABLE_STAGES and selection.exists():
+        witness=json.loads(selection.read_text()); verify_record(witness)
+        if witness.get('stage')!=stage or witness.get('status') not in ('pending','completed'):
+            raise ValueError('Invalid pre-freeze selection witness')
+        target=_receipt_reference(root,stage,witness['receipt'])
+        previous=_receipt_reference(root,stage,witness['previous'],legacy=True)
+        if json.loads(target.read_text()).get('supersedes')!=witness['previous']:
+            raise ValueError('Receipt selection witness supersession identity mismatch')
+        value=json.loads(selector.read_text()) if selector.exists() else None
+        if value is not None:
+            verify_record(value)
+            if value.get('stage')!=stage:
+                raise ValueError('Invalid pre-freeze active receipt reference')
+        reference=None if value is None else value.get('receipt')
+        if witness['status']=='completed':
+            if reference!=witness['receipt']:
+                raise ValueError('Completed receipt selection has a missing or stale active selector')
+        else:
+            # The previous publication stays available after a failed pointer
+            # replacement. Never treat the not-yet-committed target as active.
+            if reference==witness['previous'] or reference is None and previous.name==stage+'.json':
+                warnings.warn('Receipt selection interrupted; retaining the previous publication',RuntimeWarning)
+                return previous
+            raise ValueError('Receipt selection interrupted before commit; previous publication retained in selection witness')
     if stage in _SUPERSEDABLE_STAGES and selector.exists():
         value=json.loads(selector.read_text()); verify_record(value)
-        reference=value['receipt']; path=Path(reference['path'])
-        if (value.get('stage')!=stage or path.parent.resolve()!=root.resolve()
-                or not path.name.startswith(stage+'-') or path.suffix!='.json'):
+        if value.get('stage')!=stage:
             raise ValueError('Invalid pre-freeze active receipt reference')
-        verify_reference(reference)
-        return path
+        if not selection.exists() and _completed_legacy_supersession(config,stage,supersedes=value['receipt']):
+            raise ValueError('Historical active selector is stale after completed receipt supersession')
+        return _receipt_reference(root,stage,value['receipt'])
+    if stage in _SUPERSEDABLE_STAGES and _completed_legacy_supersession(config,stage):
+        raise ValueError('Completed receipt supersession has a missing active selector')
     return root/f'{stage}.json'
 
 
@@ -161,6 +232,8 @@ def read_stage(config,stage,inputs=None):
     path=stage_path(config,stage)
     record=json.loads(path.read_text())
     verify_record(record)
+    if record.get('stage')!=stage:
+        raise ValueError('Stage receipt identity mismatch')
     if record['status']!='completed':
         raise ValueError(f'{stage} prerequisite is incomplete')
     if inputs is not None and record['input_sha256']!=canonical_sha256(inputs):
@@ -193,5 +266,15 @@ def save_stage(config,stage,inputs,artifacts,attempt_ids,*,supersedes=None,**ext
     if supersedes:
         selector=dict(schema_version=1,stage=stage,receipt=file_reference(path))
         selector['output_sha256']=canonical_sha256(selector)
+        # The independent witness distinguishes an orphan replacement from a
+        # committed selection, including deletion of the active selector later.
+        selection=dict(schema_version=1,stage=stage,status='pending',
+                       receipt=selector['receipt'],previous=supersedes)
+        selection['output_sha256']=canonical_sha256(selection)
+        atomic_write_json(root/f'{stage}.selection.json',selection)
         atomic_write_json(root/f'{stage}.active.json',selector)
+        selection['status']='completed'
+        selection.pop('output_sha256')
+        selection['output_sha256']=canonical_sha256(selection)
+        atomic_write_json(root/f'{stage}.selection.json',selection)
     return record

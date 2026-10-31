@@ -4,7 +4,7 @@ from dataclasses import replace
 import numpy as np
 import pytest
 
-from test_protocol_lock import frozen_study
+from test_protocol_lock import frozen_study, ready_to_freeze
 from test_stage_pipeline import pipeline
 
 

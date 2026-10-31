@@ -15,6 +15,7 @@ from pathlib import Path
 import re
 import shutil
 import tempfile
+from types import MappingProxyType
 
 import numpy as np
 from threadpoolctl import threadpool_limits, threadpool_info
@@ -257,6 +258,8 @@ class EmbeddingCache:
         if (ids.ndim != 1 or ids.dtype.kind not in "iu" or len(ids) == 0
                 or np.any(ids[1:] <= ids[:-1])):
             raise ValueError("Embedding item IDs must be unique sorted integers")
+        if ids.dtype.kind == "u" and np.any(ids > np.iinfo(np.int64).max):
+            raise ValueError("Embedding item IDs must fit the int64 range")
         vectors = _normalized(self.vectors)
         if len(ids) != len(vectors):
             raise ValueError("Embedding vector and item-ID shape mismatch")
@@ -264,13 +267,16 @@ class EmbeddingCache:
         object.__setattr__(self, "item_ids", np.frombuffer(ids.astype(np.int64).tobytes(), dtype=np.int64))
         object.__setattr__(self, "vectors", np.frombuffer(vectors.tobytes(), dtype=np.float64).reshape(vectors.shape))
         object.__setattr__(self, "manifest", _json_copy(self.manifest))
+        # Derived lookup state is deliberately not a dataclass field: manifests,
+        # equality and serialization continue to describe the scientific inputs.
+        object.__setattr__(self, "_id_index", MappingProxyType(
+            {int(item): row for row, item in enumerate(self.item_ids)}))
 
     def _row_indices(self, item_ids):
         requested = list(item_ids)
         if any(type(item) is not int and not isinstance(item, np.integer) for item in requested):
             raise ValueError("Embedding row lookup requires integer IDs")
-        index = {int(item): row for row, item in enumerate(self.item_ids)}
-        return [index[int(item)] for item in requested]
+        return [self._id_index[int(item)] for item in requested]
 
     def rows(self, item_ids) -> np.ndarray:
         return self.vectors[self._row_indices(item_ids)]
