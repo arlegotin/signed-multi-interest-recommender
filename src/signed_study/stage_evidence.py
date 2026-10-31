@@ -99,7 +99,17 @@ def record_correctness(config,ledger):
                     attempt_ids=[evidence_attempt,*attempts,write_attempt],command_attempt_ids=attempts,
                     returncode=rc,stop_reason=None if rc==0 and unchanged else 'Correctness failed or inputs changed')
         result['output_sha256']=canonical_sha256(result)
-        atomic_write_json(config.paths['results']/'correctness.json',result)
+        path=config.paths['results']/'correctness.json'
+        if path.exists():
+            previous=json.loads(path.read_text())
+            verify_record(previous)
+            archive=path.with_name(f"correctness-{previous['output_sha256']}.json")
+            if archive.exists() and archive.read_bytes()!=path.read_bytes():
+                raise ValueError('Historical correctness archive differs from original')
+            if not archive.exists():
+                with archive.open('xb') as handle:
+                    handle.write(path.read_bytes()); handle.flush(); os.fsync(handle.fileno())
+        atomic_write_json(path,result)
     return result
 
 

@@ -38,9 +38,11 @@ Saved G2 computation succeeded, but its terminal forecast admission failed.
 Resume by verifying its original ledger-bound publication, workload journal,
 complete cache, policy and numerical checks, and publish a new versioned
 calibration receipt under the new policy and current successful G1 proof. Do
-not overwrite `results/calibration.json` or the old stop report, relabel the
-failed attempt as successful, repeat encoding/fits, or count its 1056 evaluations
-twice. Consumers must resolve the completed calibration stage's artifact path.
+not overwrite `results/calibration.json`, relabel the failed attempt as
+successful, repeat encoding/fits, or count its 1056 evaluations twice. Preserve
+the old generated report and exports byte-for-byte in a hash-indexed historical
+directory before publishing the new active report. Consumers must resolve the
+completed calibration stage's artifact path.
 Record the original failed publication and attempt as provenance, separate from
 the new successful adoption attempt.
 

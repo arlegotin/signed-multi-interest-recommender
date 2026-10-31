@@ -385,7 +385,7 @@ Input: unit float64 positive rows X in ascending item-ID order, associated IDs, 
 
 K=1 produces the normalized positive mean unless that mean vanishes, in which case it retains the deterministic observed-row fallback. Log this rare fallback; it is not an arbitrary division by zero. Unused/duplicate resulting prototypes may be deduplicated for scoring without changing the maximum, but preserve requested and effective K in results.
 
-A cap hit is a reported finite-heuristic outcome, not automatically a failed user. If more than 5% of calibration users hit the cap, inspect the objective traces. A single pre-freeze increase to 100 updates for **all** prototype-using methods is allowed within repair budget; record it. Do not tune initialization using held-out labels.
+A cap hit is a reported finite-heuristic outcome, not automatically a failed user. If more than 5% of calibration users hit the cap, inspect the objective traces. A single pre-freeze increase to 100 updates for **all** prototype-using methods is allowed with recorded scientific evidence; record it. Do not tune initialization using held-out labels.
 
 ### 5.2 Scoring pseudocode
 
@@ -469,11 +469,11 @@ $$
 
 There are 20 configurations. Use contiguous float64 arrays, one user/model at a time, and release model objects after saving required outputs. SVC has at least quadratic sample scaling [R13]; the support cap of 192 avoids a large full-dataset kernel.
 
-Treat solver warnings, nonfinite decision values, nonzero SVC fit_status_, and iteration exhaustion as failed fits requiring the bounded failure policy. Do not silently substitute a simpler classifier. One global pre-freeze increase to 4,000 logistic iterations / 200,000 SVM iterations is allowed if calibration demonstrates a convergence issue and the budget still fits.
+Treat solver warnings, nonfinite decision values, nonzero SVC fit_status_, and iteration exhaustion as failed fits requiring the bounded failure policy. Do not silently substitute a simpler classifier. One global pre-freeze increase to 4,000 logistic iterations / 200,000 SVM iterations is allowed if calibration demonstrates a convergence issue and non-time resources permit it.
 
 ### 6.3 Tuning and freeze
 
-Score all development users for every declared configuration, or the fixed outcome-independent subset allowed by resource calibration. Choose each family's configuration by maximum macro development AUC. For differences <=1e-6, prefer smaller K, then smaller lambda, then smaller C, then smaller g, then lexicographic configuration ID as applicable.
+Score all development users for every declared configuration, using the full primary cohort under results-first (legacy bounded studies retain their predeclared outcome-independent calibration subsets). Choose each family's configuration by maximum macro development AUC. For differences <=1e-6, prefer smaller K, then smaller lambda, then smaller C, then smaller g, then lexicographic configuration ID as applicable.
 
 Select B* by maximum development AUC among the selected required comparator families, excluding SignedMax and the deliberately untuned matched variants. An exact tie uses the lexicographic family ID. Do not choose B* by confirmation.
 
@@ -553,7 +553,7 @@ These checks verify arithmetic and help specify tests. They establish no recomme
 
 No random unobserved negatives, repeated benchmark hunting, extra datasets after a disappointing result, or large synthetic sweep is needed. Real held-out observations are the representative cases; the exact fixtures isolate behavior. If only the fixtures work, state that plainly.
 
-For contamination, swap the signs of q positive and q negative support items, with q=max(1,floor(0.1*min(h_pos,h_neg))). Sample without replacement using seeds 1101,1102,1103, preserve class counts and the original support IDs, refit all four methods, and leave evaluation labels unchanged. Use their original frozen hyperparameters; this is a stress diagnostic, not a newly tuned regime. Cache the swap assignments so every method gets identical corrupted histories. Run it only if at least 20 minutes remain beyond the reporting reserve and the diagnostic question is applicable; otherwise report it unperformed.
+For contamination, swap the signs of q positive and q negative support items, with q=max(1,floor(0.1*min(h_pos,h_neg))). Sample without replacement using seeds 1101,1102,1103, preserve class counts and the original support IDs, refit all four methods, and leave evaluation labels unchanged. Use their original frozen hyperparameters; this is a stress diagnostic, not a newly tuned regime. Cache the swap assignments so every method gets identical corrupted histories. Run it when the diagnostic question is applicable and actual non-time resources permit it. Under the 31 October results-first amendment, the original 20-minute headroom rule is advisory; otherwise report it unperformed.
 
 ## 8. Metrics, uncertainty, and interpretation limits
 
@@ -649,25 +649,37 @@ Record actual chip, RAM, available storage, macOS, native arm64 versus translati
 
 Use a virtual environment and native arm64 wheels if supported. The primary implementation uses CPU; CUDA and MPS are not required. This avoids relying on unverified Metal support or GPU float64. If the machine is not the requested Mac, prepare code, documentation, data-source checks, and analytic derivations as possible, but do not run or claim the target experiments elsewhere.
 
-### 9.2 Hard cumulative ceilings
+### 9.2 Results-first execution policy and hard non-time ceilings
 
-All numbers below are planning choices, not measured M3 performance.
+The user-authorized 31 October 2026 amendment supersedes elapsed-time stop rules.
+Append an explicit, validated `results_first` policy event to the permanent ledger
+before freeze or confirmation exposure; do not change the original resource hash,
+reset history, inflate configured caps, or discard failed attempts. Unamended
+legacy ledgers retain bounded behavior. Adoption is durable and idempotent.
+
+Original timing numbers below are historical planning estimates, not measured M3
+performance. Under results-first, actual setup/experimental/stage/repair elapsed
+time, allocations, 1.5 forecast multiplier and reporting reserve remain recorded
+and advisory. They cannot reject, shrink or stop the study. Ordinary material
+implementation repairs remain logged and reviewed without the former two-cycle
+quota preventing completion. Fixed scientific solver/prototype repair rules,
+numerical iteration limits and all scientific gates remain enforced.
 
 | Resource | Ceiling / rule |
 |---|---|
-| Experimental wall time | 240 minutes total, including preprocessing, calibration, tuning, failed attempts, repairs, comparisons, diagnostics, analysis computation, and local result packaging. |
-| Acquisition/setup waiting | Separate maximum 45 minutes for ordinary package/model/data downloads and environment setup; no paid or remote experimental compute. |
+| Experimental wall time | Historical 240-minute estimate; advisory under results-first. Count preprocessing, calibration, tuning, failures, repairs, comparisons, diagnostics, analysis and packaging cumulatively. |
+| Acquisition/setup waiting | Historical separate 45-minute estimate; advisory under results-first. No paid or remote experimental compute. |
 | Peak process-tree resident memory | min(8 GiB,25% of installed RAM). Use one worker initially. |
 | Free-memory check | Require at least 4 GiB of estimated available headroom before a heavy stage; log the measurement method. |
 | Project disk growth | <=6 GiB, including environment, model cache, raw/derived data, temporary arrays, outputs, and logs. Require 12 GiB free initially. |
 | Model/config/user evaluations | <=100,000 cumulatively, including tuning, repairs, diagnostics, and repeated timing invocations. Count attempted failures too. |
 | Hyperparameter additions | <=14 entries beyond the 78-entry declared grid, once and before freeze. |
-| Repair allowance | <=20 experimental minutes and at most two material repair cycles. Repairs consume the 240-minute total. |
-| Reporting reserve | Protect the final 30 experimental minutes for evidence preservation, analysis, and report generation. |
+| Repair allowance | Historical 20-minute/two-material-cycle estimate; advisory for ordinary implementation repairs. Preserve costs, failures and review evidence. |
+| Reporting reserve | Historical 30-minute planning reserve; advisory under results-first. Complete evidence preservation, analysis and reporting. |
 
 Downloading libraries and editing source are not the same as benchmark runtime. **Estimated end-to-end effort:** setup 30–45 minutes, implementation/correctness work 4–8 hours, experimental execution typically 1–4 hours, interpretation/reporting 1–2 hours; roughly one to two working days depending on access and repair needs. These are effort estimates, not promises. The first informative computational pilot should take approximately 45–60 minutes once code and dependencies exist.
 
-Use a persistent ledger of stage elapsed seconds, attempted evaluations, peak memory, and bytes. Switching dataset, retrying a model, changing a stage name, or restarting the process does not reset caps. Record setup waiting separately. Reserve evidence and reporting resources before admitting optional work.
+Use a persistent ledger of stage elapsed seconds, attempted evaluations, peak memory, and bytes. Switching dataset, retrying a model, changing a stage name, or restarting the process does not reset caps. Record setup waiting separately. Determine optional work from scientific applicability and actual non-time resource availability.
 
 ### 9.3 Scaling and calibration rules
 
@@ -678,7 +690,7 @@ These arithmetic estimates do not establish total RSS or runtime. Transformer in
 G1's correctness fixtures are independent of text encoding. G2 owns construction of the complete embedding cache and proceeds sequentially:
 
 1. Load the pinned encoder, time 128 representative title/genre inputs, and run the 32-item repeatability check. Select calibration metadata by deterministic item-ID hash, without rating outcomes.
-2. Project full-catalog preprocessing cost. Only if it fits the remaining G2 and cumulative budgets with the safety margin, encode all 3,883 metadata items once in item-ID order and save/verify the shared cache. Count the initial 128 and repeated 32 encodings as additional calibration work; re-encoding them in the complete cache is intentional and budgeted.
+2. Project full-catalog preprocessing cost as a diagnostic. When actual non-time resource checks pass, encode all 3,883 metadata items once in item-ID order and save/verify the shared cache. Count the initial 128 and repeated 32 encodings as additional calibration work; re-encoding them in the complete cache is intentional and budgeted.
 3. With that complete cache, calibrate 32 development users selected from the fixed digest order to cover support-size quartiles and long evaluation candidate sets. Include all families and high-cost endpoints.
 
 The calibration command performs all three steps. Develop must refuse to run unless a complete cache has the expected item-ID mapping, pinned model revision, template hash, dimensions, finite values, and normalization checks. Measure:
@@ -691,15 +703,28 @@ The calibration command performs all three steps. Develop must refuse to run unl
 
 Project costs using measured per-item/per-user work and candidate/history sizes, not chip marketing throughput. For ranking matrices, include the d*m*(K+J) scale. For SVMs, use measured support-size sensitivity rather than claiming a fixed cubic or quadratic law for this exact workload.
 
-Admit the next stage only if its projected cost multiplied by 1.5 fits its remaining allocation and leaves the report reserve intact. If not, apply the following sequence **before freeze**:
+Retain measured forecasts and the historical 1.5 safety multiplier as diagnostics.
+Under results-first they cannot reject stages, remove optional work, change chunks
+or shrink cohorts for elapsed-time headroom. Use all 418 development and 1776
+confirmation users in the original full-SHA256 digest order, determined before
+outcomes. Keep the canonical measured scoring chunk unless a measured non-time
+resource issue requires a globally valid policy and verified chunk invariance.
+Memory-bound embedding changes require measured verification. Never remove strong
+baselines, selectively shrink feedback, relax solver tolerances or change metrics.
+The separate access-only 100K fallback retains all 62 development and 225
+confirmation users and its 1,682-item catalog; time forecasts do not authorize it.
 
-1. Remove optional contamination and expanded latency repetitions.
-2. Reduce embedding batch size if memory-bound; this cannot change the model or representation.
-3. Reduce scoring chunk size; verify chunk invariance.
-4. Select development/confirmation users by full SHA256 digest order, never by model performance. Test scale pairs in this fixed order, prioritizing confirmation precision: (418,1776), (256,1776), (418,1500), (256,1500), (418,1000), (256,1000). Admit the first pair whose cost forecast with the 1.5 safety multiplier fits all remaining allocations. Record the new interval-width estimate.
-5. Do not remove strong baselines, shrink feedback selectively for one method, silently relax solver tolerances, or change the primary metric to fit.
-
-If the smallest primary scale cannot fit, record practical infeasibility for the intended study. A smaller diagnostic can be reported as such, but is not successful completion of the intended confirmation. The declared 100K access fallback is separate: use all 62 development and 225 confirmation users and its 1,682-item catalog. Do not apply the primary scale list or shrink the fallback further while presenting it as confirmation. If that already small fallback cannot run within remaining caps, complete a diagnostic/infeasibility report.
+The first native stop at G2 was a forecast-only historical outcome. Preserve its
+report, `results/calibration.json` bytes/path/hash, failed attempt and dependencies.
+`resume-calibration` verifies that original terminal publication, historical G1,
+unchanged scientific source/settings, completed workload/journal, accepted
+numerical checks and the complete cache, then publishes a versioned calibration
+artifact and successful stage under current G1. Its new admissions reserve zero
+evaluations; the original 1056 evaluations remain counted once. Archive original
+correctness bytes before replacing active G1. Consumers resolve calibration from
+the completed stage artifact, preserving original publications. No re-encoding or
+refitting occurs in this adoption. Hard memory/disk/evaluation violations or
+unresolved scientific defects still block continuation and must remain explicit.
 
 ### 9.4 Timing and memory protocol
 
@@ -707,7 +732,7 @@ Use time.perf_counter_ns around clear boundaries. Report cold preprocessing once
 
 For selected-method microbenchmarks, use the same 32 development users and all 3,883 metadata item vectors. Run one warm-up and five timed repetitions, rotating method order deterministically. Fit timing starts from that user's raw capped vectors; scoring timing starts with a fitted user representation and a resident candidate matrix. Include dot products, reductions, and stable sorting in end-to-end rank latency; optionally separate score-only timing. Do not include downloads in warm scoring.
 
-Use a fixed CPU thread policy selected in calibration: start at one BLAS thread and one inference worker; optionally choose four CPU threads if measured throughput improves without exceeding resources. Apply the same policy to compared methods and record actual library settings. Do not oversubscribe user processes and BLAS threads.
+Use the fixed calibrated CPU thread policy: one BLAS thread and one inference worker throughout the results-first continuation. Apply the same policy to compared methods and record actual library settings. Do not oversubscribe user processes and BLAS threads.
 
 Measure process-tree RSS with psutil sampling at 100 ms and OS maximum-RSS facilities where available; report the maximum and the method. Python tracemalloc alone misses native arrays/framework memory. Timing runs execute serially without unrelated experimental processes. Report median and p95 across users, and repeat variability. No accuracy-seed confidence interval should be inferred from warm timing repeats.
 
@@ -715,20 +740,20 @@ Give cold total cost and an explicit amortization scenario of 1,000 user scoring
 
 ## 10. Evidence gates and autonomous next actions
 
-Stage budgets below total 230 minutes, leaving 10 minutes of general scheduling overhead within the 240-minute ceiling. Setup waiting is separately capped as above.
+The historical stage estimates below total 230 minutes, with 10 minutes of scheduling overhead. All elapsed allocations and reserve rules in this table are advisory under the results-first amendment; non-time resource and scientific gates remain authoritative.
 
 | Gate | Question, prerequisites, and minimum work | Evidence / budget | Decision and next action |
 |---|---|---|---|
 | G0 Constructive feasibility | Does the actual Mac, accessible dataset/model, and license-compatible local workflow support the fixed study? Inspect environment; acquire data; reproduce schema/cohort counts; resolve encoder revision. | environment.json, data_manifest.json, cohort_audit.json; 10 experimental minutes | Continue if valid. Two bounded access attempts then 100K fallback if applicable. Unavailable indispensable hardware/model: finish unaffected work and report blocker. |
 | G1 Tiny correctness | Are geometry, baselines, splitting, and metrics valid? Implement only the scorer, prototype constructor, essential fits, and independent tests. | tests, oracle outputs, analytic counterexamples; 10 minutes | Continue only if all mandatory checks pass. Repair within shared allowance; unresolved defect means invalid experiment/stop. |
-| G2 Resource calibration | Can preprocessing and all comparator families finish within caps? Prerequisite G1. Run the 128-item encoder probe, admit/build the complete cache, then calibrate 32 development users as in Section 9.3. | calibration.json, verified embedding cache, memory/time traces, planned sample sizes; 20 minutes | Continue with 1.5 safety margin; apply outcome-independent resizing rules. Otherwise practical infeasibility. No expensive infrastructure before this gate. |
+| G2 Resource calibration | Can preprocessing and all comparator families finish within caps? Prerequisite G1. Run the 128-item encoder probe, admit/build the complete cache, then calibrate 32 development users as in Section 9.3. | calibration.json, verified embedding cache, memory/time traces, planned sample sizes; 20 minutes | Verify numerical validity, full cache and non-time resources; use the full primary cohort. Keep the 1.5 forecast as advisory diagnostic. Preserve the original forecast-only stop as history. |
 | G3 Mechanism pilot and development | Does the setup detect the known effect, fit meaningful references, and support a fair locked study? Run exact controls, development grid, bounded endpoint expansions, and precision estimate. | all development runs, chosen parameters/B*, failure table, protocol.lock.json; 40 minutes | A small noisy advantage is not a stop rule. Continue if valid and resource-feasible; if real signal is weak, retain question and limits. Missing strong baseline or unresolved numerical issue blocks confirmation. |
-| G4 Locked comparison | Does S* clear the fixed threshold against B* on untouched evaluation outcomes? Prerequisite frozen protocol. Evaluate all selected models and matched controls. | raw per-user metrics and candidate scores, model diagnostics, primary paired interval; 80 minutes | Analyze once. Do not retune after outcomes. A fatal protocol defect invokes invalid-experiment rules. Time exhaustion preserves partial evidence and bounds. |
-| G5 Bounded diagnosis | Is an observed effect consistent with negative aggregation and stable numerically? Reuse strata; precision check; conditional contamination; selected-method timing. | diagnostic tables/figures, latency and RSS; 20 minutes | Perform only applicable diagnostics that fit. Do not invent rescue methods. If time is short, preserve results and proceed to report. |
+| G4 Locked comparison | Does S* clear the fixed threshold against B* on untouched evaluation outcomes? Prerequisite frozen protocol. Evaluate all selected models and matched controls. | raw per-user metrics and candidate scores, model diagnostics, primary paired interval; 80 minutes | Analyze once. Do not retune after outcomes. A fatal protocol defect invokes invalid-experiment rules. Preserve all partial evidence and bounds on actual non-time resource failure; elapsed time cannot stop comparison. |
+| G5 Bounded diagnosis | Is an observed effect consistent with negative aggregation and stable numerically? Reuse strata; precision check; conditional contamination; selected-method timing. | diagnostic tables/figures, latency and RSS; 20 minutes | Perform only applicable diagnostics that fit. Do not invent rescue methods. Elapsed headroom cannot skip applicable diagnostics; preserve actual non-time resource limitations. |
 | G6 Diagnosis and report | What conclusion is justified by the reached stages? Regenerate tables/plots, check claims, package code and local reproducibility evidence. | report.md, results tables, figures, README, manifests; 30 minutes protected | Complete the outcome even for early stop. State unperformed work and one justified next step, if any. |
-| Shared repair reserve | Ordinary bugs, setup-compatible API fixes, bounded convergence repairs; at most two material cycles. | repair log and rerun IDs; 20 minutes | Consumes total budget. Post-freeze changes follow invalidation rules; never erase original attempts. |
+| Shared repair reserve | Ordinary bugs, setup-compatible API fixes, fixed scientific convergence repairs; ordinary material cycle quota advisory. | repair log and rerun IDs; 20 minutes | Record cumulative time and cycles. Post-freeze changes follow invalidation rules; never erase original attempts. |
 
-Budget allocations may move between unfinished stages only before confirmation and only without reducing the report reserve or increasing total caps. Log the reallocation and its reason. Do not use an unspent expensive-stage budget to launch a new research direction.
+Preserve all historical budget allocations and transfers. Under results-first no reallocation is needed for elapsed headroom; retain forecasts and actual cumulative costs. Do not use an unspent expensive-stage budget to launch a new research direction.
 
 ## 11. Repository, interfaces, and intended commands
 
@@ -930,7 +955,7 @@ Three distinct review passes were performed during planning: mathematical/novelt
 | A post-freeze bug may require rerunning. | Preserve failed runs; corrected same-holdout analysis is exploratory after outcome exposure. |
 | Missing-run mean bounds ignored sampling uncertainty. | Primary decisions now use a paired-bootstrap confidence envelope over missing-result bounds. |
 | Exact chunk/ordering invariance could falsely reject valid BLAS results. | Tolerance-based score checks and near-tie-aware ordering checks replace bitwise equivalence. |
-| Finite precision or resource limits may change results. | CPU float64 geometry, explicit degeneracies, independent oracle, precision diagnostic, and hard cumulative caps. |
+| Finite precision or resource limits may change results. | CPU float64 geometry, explicit degeneracies, independent oracle, precision diagnostic, and hard cumulative non-time caps. |
 | The main hypothesis may be false. | Stop after valid evidence, publish the scoped limitation in the report, and recommend further work only if a specific unresolved cause warrants it. |
 
 Residual risks are real: title/genre features may be too weak; ratings are self-selected and context-limited; public encoder pretraining is not fully auditable; a single catalog cannot establish broad generality; and actual Mac compatibility, speed, and memory remain unmeasured. These risks are either early gates or explicit boundaries on the conclusion. They are not reasons to manufacture a positive outcome.

@@ -17,7 +17,7 @@ from .budget import BudgetExceeded
 from .metrics import assign_stratum, evaluate_user, history_statistics, paired_analysis
 from .models import fit_user, score_user
 from .protocol import ProtocolMismatch, canonical_sha256
-from .stage_evidence import plain, verify_record, file_reference
+from .stage_evidence import plain, verify_record, file_reference, read_stage
 
 
 CONTAMINATION_METHODS = ('SignedMax', 'MeanNegative', 'LinearLogistic', 'RBFSVM')
@@ -240,6 +240,11 @@ def contamination_applicable(saved, strata, numerical, plan, config):
 
 def contamination_skip_reason(applicable, state, plan, config):
     if not applicable: return 'Diagnostic question not applicable under frozen rule'
+    from .budget import results_first, time_forecast_fits
+    if (not time_forecast_fits(state,config,{'G5':plan['seconds']})
+            or state['attempted_evaluations']+plan['evaluations']>config.resources['evaluation_limit']):
+        return 'Frozen conditional schedule does not fit remaining time/evaluations beyond reserve'
+    if results_first(state): return None
     remaining=config.resources['experimental_seconds']-config.resources['report_reserve_seconds']-state['experimental_seconds']
     if remaining<config.contamination['minimum_extra_seconds']: return 'Fewer than 20 minutes remain beyond reporting reserve'
     margin=config.resources['safety_multiplier']
@@ -381,7 +386,8 @@ def _diagnose(lock_path,ledger):
             dev={e.history.user_id:e for e in store.development}
             if len(cache.item_ids)!=forecast['catalog_items']: raise ProtocolMismatch('Full active timing catalog changed')
             rows=timing_measurements(dev,forecast['timing_user_ids'],selected['comparison_schedule'],cache,resolved,ledger,record)
-            calibration=json.loads((resolved.paths['results']/'calibration.json').read_text())
+            from .stages import calibration_measurements
+            calibration=calibration_measurements(resolved,read_stage(resolved,'calibrate'))
             result['timing']=timing_summary(rows,calibration,resolved)
             result['timing']['attempts']=rows
         result['resources']=ledger.checkpoint()

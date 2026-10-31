@@ -52,7 +52,7 @@ def source_identity():
 
 def _context(config,ledger):
     # All these reads concern provenance/history bytes, never semantic outcomes.
-    from .stages import _acquired, _prerequisite
+    from .stages import _acquired, _prerequisite, calibration_measurements
     source=source_identity()
     if source.get('clean') is not True or not source.get('commit') or not source.get('content'):
         raise ProtocolMismatch('Clean committed source/content proof is required')
@@ -70,12 +70,12 @@ def _context(config,ledger):
     cache=load_embedding_cache(resolved.paths['cache']/'embeddings',expected)
     development=json.loads(Path(stage['artifacts']['development']['path']).read_text())
     evidence.verify_record(development)
-    measurements=json.loads((config.paths['results']/'calibration.json').read_text())
-    evidence.verify_record(measurements)
+    measurements=calibration_measurements(config,calibration)
     if development['input_sha256']!=canonical_sha256(dict(config=evidence.config_record(resolved),calibration=measurements['output_sha256'])):
         raise ProtocolMismatch('Development resolved policy/calibration changed')
     refs={name:evidence.file_reference(config.paths['results']/name) for name in
-          ('environment.json','resolved_config.json','calibration_config.json','calibration.json')}
+          ('environment.json','resolved_config.json','calibration_config.json')}
+    refs['calibration.json']=calibration['artifacts']['calibration']
     refs.update({f'stage_{name}':evidence.file_reference(config.paths['results']/'stages'/f'{name}.json')
                  for name in ('acquire','audit','calibrate','smoke','develop')})
     # Verify all selected outcome bytes before allowing even the first array load.
@@ -94,6 +94,7 @@ def _context(config,ledger):
                     table_schemas_sha256=canonical_sha256(TABLE_SCHEMAS),
                     metric_sha256=evidence.file_reference(Path(__file__).with_name('metrics.py'))['sha256'],
                     resources_sha256=ledger.snapshot()['resources_sha256'])
+    identities['execution_policy']=ledger.snapshot().get('execution_policy',{'mode':'bounded'})
     return dict(identities=identities,ledger_events=ledger.snapshot()['events']),resolved,store,cache,development,stage
 
 
@@ -169,7 +170,9 @@ def _validate_schedule(development,config,store,ledger):
             or plan.get('evaluations')!=len(plan.get('user_ids',[]))*12
             or not isinstance(plan.get('seconds'),(int,float)) or not math.isfinite(plan['seconds']) or plan['seconds']<0):
         raise ProtocolMismatch('Conditional diagnostic plan is not frozen completely')
-    if any(not math.isfinite(seconds[s]) or seconds[s]<0 or state['stage_seconds'][s]+caps['safety_multiplier']*seconds[s]>state['stage_limits'][s] for s in ('G4','G5')) or state['attempted_evaluations']+sum(evaluations.values())>caps['evaluation_limit'] or state['experimental_seconds']+caps['safety_multiplier']*sum(seconds.values())>caps['experimental_seconds']-caps['report_reserve_seconds']:
+    from .budget import time_forecast_fits
+    if (not time_forecast_fits(state,config,{s:seconds[s] for s in ('G4','G5')})
+            or state['attempted_evaluations']+sum(evaluations.values())>caps['evaluation_limit']):
         raise ProtocolMismatch('Selected schedule no longer fits effective resource limits')
 
 

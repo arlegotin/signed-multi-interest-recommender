@@ -13,7 +13,7 @@ from pathlib import Path
 from statistics import fmean
 
 from . import confirmation, diagnostics, protocol_lock
-from .budget import Ledger
+from .budget import Ledger, results_first
 from .protocol import ProtocolMismatch, canonical_sha256, config_from_record, load_config
 from .stage_evidence import file_reference, verify_record, verify_reference
 
@@ -142,7 +142,8 @@ def _repair_summaries(state,problems):
             if (type(value['attributed_seconds']) not in (int,float)
                     or not math.isfinite(value['attributed_seconds'])
                     or not math.isclose(total,value['attributed_seconds'],rel_tol=0,abs_tol=1e-6)
-                    or not 0<=total<=1200 or value['repair_cycle']!=cycle or not 1<=cycle<=2):
+                    or total<0 or value['repair_cycle']!=cycle or cycle<1
+                    or not results_first(state) and (total>1200 or cycle>2)):
                 raise ValueError('Repair cost/cycle disagrees with ledger')
             if any(a not in attempts or attempts[a]['status']=='completed' for a in value['failure_attempt_ids']):
                 raise ValueError('Repair original failure not retained')
@@ -234,12 +235,13 @@ def _actual_work(root,ledger,payload,stage_records,problems,state):
     for name,record in stage_records:
         if name not in ('calibrate','smoke','develop'): continue
         for label,reference in record.get('artifacts',{}).items():
-            if ((name=='calibrate' and Path(reference['path']).name=='calibration.json')
+            if ((name=='calibrate' and label in ('calibration','calibrate'))
                     or name=='smoke' and label in ('attempts','smoke')
                     or name=='develop' and label=='development'):
                 try:
                     value=load(reference)
-                    ids=value.get('attempt_ids',record['attempt_ids'])
+                    reused=value.get('reused_measurement_provenance')
+                    ids=[reused['parent_attempt_id']] if reused else value.get('attempt_ids',record['attempt_ids'])
                     add({'calibrate':'calibration','smoke':'smoke','develop':'development'}[name],ids,value)
                 except (ValueError,OSError,KeyError,TypeError) as error:problems.append(f'Actual work {name}: {error}')
     # Failed calibration publications can exist without a completed stage.
@@ -399,10 +401,11 @@ def render_report(results_directory: Path) -> dict:
     # Only verified stage references supply acquisition/audit/calibration details.
     details={};detail_references={}
     for name,ref in artifacts.items():
-        if Path(ref['path']).name in ('data_manifest.json','encoder_acquisition.json','cohort_audit.json','calibration.json'):
+        if name in ('calibration','calibrate') or Path(ref['path']).name in ('data_manifest.json','encoder_acquisition.json','cohort_audit.json'):
             try:
-                details[Path(ref['path']).name]=json.loads(Path(ref['path']).read_text())
-                detail_references[Path(ref['path']).name]=ref
+                key='calibration.json' if name in ('calibration','calibrate') else Path(ref['path']).name
+                details[key]=json.loads(Path(ref['path']).read_text())
+                detail_references[key]=ref
             except (ValueError,OSError) as error: problems.append(f'{name}: {error}')
     calibration=details.get('calibration.json')
     calibration_reference=detail_references.get('calibration.json')
@@ -435,7 +438,7 @@ def render_report(results_directory: Path) -> dict:
     resource_limited=bool((not saved and relevant_work and relevant_work[-1]['status']=='budget_exceeded')
                           or saved and saved['status']=='budget_exceeded')
     forecast=calibration.get('forecast') or {}
-    scaling_stop=bool(not saved and calibration_published and calibration.get('status')=='completed' and calibration.get('actual_evaluations',0)>0
+    scaling_stop=bool(not results_first(state) and not saved and calibration_published and calibration.get('status')=='completed' and calibration.get('actual_evaluations',0)>0
         and forecast.get('status')=='infeasible' and forecast.get('tested_scales')
         and any(a['stage']=='G2' and a['status']=='failed' and a.get('measurements',{}).get('exception')==forecast.get('stop_reason') for a in attempts.values())
         and any(r.get('stage')=='calibrate' and r.get('stop_reason')==forecast.get('stop_reason') for r in failed_records))
@@ -555,6 +558,7 @@ def render_report(results_directory: Path) -> dict:
         'Accounting snapshot as-of ledger event count '+str(len(state.get('events',[])))+'; SHA256 '+canonical_sha256({'events':state.get('events',[])})+'. Repeated CLI reporting extends this ledger; scientific tables retain the same saved values.',
         _json(cost_rows),
         'Cumulative experimental seconds: '+str(state.get('experimental_seconds',0))+'; reserved attempted evaluations: '+str(state.get('attempted_evaluations',0))+'; actual confirmation evaluations: '+str(saved.get('actual_evaluations','unavailable') if saved else 'unavailable')+'. Reservations are not actual executed user/configuration attempts.',
+        'Execution policy: '+_json(state.get('execution_policy',{'mode':'bounded'}))+'. Under results_first, elapsed totals, allocations, safety margins, reporting reserve and ordinary material repair quota are advisory. Historical stops remain preserved; non-time resource and scientific gates remain enforced.',
         'Actual saved work by stage: '+_json(actual_work)+'. Attempted counts include failed/unfinished executions, exclude unavailable numerical originals, include timing warmups/repeats and all retained original/corrected runs. Development includes its pilot; pilot_attempted is a subset, never an extra total. Unknown work remains unavailable rather than zero.',
         'Peak process-tree RSS bytes: '+str(state.get('peak_rss_bytes','unavailable'))+'; peak project disk bytes: '+str(state.get('peak_project_disk_bytes','unavailable'))+'; baseline disk bytes: '+str(state.get('baseline_disk_bytes','unavailable')),
         'Effective reallocations: '+_json([{k:r.get(k) for k in ('source_stage','target_stage','seconds','reason')} for r in state.get('reallocations',[])])+'; protected reporting seconds: '+str(state.get('report_reserve_seconds',1800)),

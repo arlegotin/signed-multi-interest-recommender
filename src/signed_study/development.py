@@ -153,9 +153,9 @@ def refresh_selected_forecast(result,store,timings,config,ledger,calibration):
         if state.get('reallocations'):
             raise ValueError('Transfer history requires effective stage limits')
         stage_limits=caps['stage_seconds']  # Legacy synthetic ledger fixtures.
+    from .budget import time_forecast_fits
     feasible=(state['attempted_evaluations']+sum(evaluations.values())<=caps['evaluation_limit']
-              and all(state['stage_seconds'][s]+margin*t<=stage_limits[s] for s,t in seconds.items())
-              and state['experimental_seconds']+margin*sum(seconds.values())<=caps['experimental_seconds']-caps['report_reserve_seconds'])
+              and time_forecast_fits(state,config,seconds))
     # The frozen schedule cannot exceed the preselected slot allowances.
     allowance=calibration['forecast']['planning']
     feasible=feasible and len(entries)<=allowance['confirmation_entries'] and (
@@ -172,8 +172,9 @@ def refresh_selected_forecast(result,store,timings,config,ledger,calibration):
         planned_sample_counts=dict(contamination_users=len(contamination_users),numerical_users=len(numerical),timing_users=len(timing_users)),
         gain_predicate='lower CI > 0; diagnostic gain only, not delta practical success',
         minimum_extra_seconds=config.contamination['minimum_extra_seconds'],
-        policy='conditional only; first hash-ordered users; no retuning; protected reporting reserve')
+        policy='conditional only; first hash-ordered users; no retuning; effective ledger execution policy')
     return dict(status='feasible' if feasible else 'infeasible',seconds=seconds,evaluations=evaluations,contamination=contamination,
+                execution_policy=state.get('execution_policy',{'mode':'bounded'}),
                 comparison_entries=len(entries),comparison_schedule=schedule,timing_user_ids=list(timing_users),
                 numerical_user_ids=[e.history.user_id for e in numerical],catalog_items=catalog,
                 cost_chunk_size=config.numerics['score_chunk_size'],safety_multiplier=margin,
@@ -216,12 +217,13 @@ def endpoint_campaign_forecast(cohort, entries, requests, timings, store, calibr
     state=ledger.snapshot();caps=config.resources;margin=caps['safety_multiplier']
     limits=state.get('stage_limits',caps['stage_seconds'])
     allowance=calibration['forecast']['planning']
+    from .budget import time_forecast_fits
     feasible=(state['attempted_evaluations']+sum(evaluations.values())<=caps['evaluation_limit']
-        and all(state['stage_seconds'][stage]+margin*cost<=limits[stage] for stage,cost in seconds.items())
-        and state['experimental_seconds']+margin*sum(seconds.values())<=caps['experimental_seconds']-caps['report_reserve_seconds']
+        and time_forecast_fits(state,config,seconds)
         and len(schedule)<=allowance['confirmation_entries']
         and evaluations['G5']<=allowance['timing_evaluations']+allowance['numerical_diagnostic_evaluations'])
     return dict(status='feasible' if feasible else 'infeasible',seconds=seconds,evaluations=evaluations,
+                execution_policy=state.get('execution_policy',{'mode':'bounded'}),
                 safety_multiplier=margin,comparison_entries=len(schedule),
                 basis='maximum measured cost per possible selected/matched slot; no endpoint outcomes',
                 stop_reason=None if feasible else 'Complete remaining endpoint campaign exceeds remaining capacity')

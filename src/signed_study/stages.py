@@ -8,21 +8,30 @@ import uuid
 
 from threadpoolctl import threadpool_limits, threadpool_info
 
-from .budget import BudgetExceeded, LedgerBusy, atomic_write_json
+from .budget import BudgetExceeded, LedgerBusy, atomic_write_json, results_first
 from .calibration import forecast_scale, select_calibration_users
-from .data import (SOURCES, Movie, _acquire_archive as acquire_archive, load_dataset,
+from .data import (SOURCES, Movie, episode_store_digest, _acquire_archive as acquire_archive, load_dataset,
                    make_episodes, load_episode_store)
 from .embed import (resolve_encoder, expected_embedding_manifest, load_encoder,
                     encode_probe, check_repeatability, encode_items, load_embedding_cache)
 from .protocol import load_config, canonical_sha256
 from .stage_evidence import (config_record, file_reference, read_stage, save_stage,
                              verify_record, verify_correctness, environment_pins,
-                             write_environment_lock, verify_environment_lock)
+                             write_environment_lock, verify_environment_lock, verify_reference)
 from .workload import measure_users, calibration_entries
 
 
 class StageBlocked(ValueError):
     pass
+
+
+def calibration_measurements(config, record):
+    """Read the verified calibration role, including versioned adopted receipts."""
+    reference=record['artifacts']['calibration']
+    verify_reference(reference)
+    result=json.loads(Path(reference['path']).read_text())
+    verify_record(result)
+    return result
 
 
 def _official(manifest):
@@ -174,6 +183,8 @@ def _calibrate(config,ledger,attempts):
             result=_prerequisite(config,'calibrate',ledger,inputs)
             load_embedding_cache(cache_path,expected)
             return result
+        if (config.paths['results']/'calibration.json').exists():
+            raise StageBlocked('Saved calibration publication exists; use resume-calibration and preserve its history')
     measurements={'schema_version':1,'input_sha256':canonical_sha256(inputs), 'timings':{},'catalog_items':len(metadata)}
     def timed(name,call):
         start=time.perf_counter_ns()
@@ -251,6 +262,159 @@ def _calibrate(config,ledger,attempts):
     return result
 
 
+def _saved_calibration(config,ledger,inputs,resolved,store,metadata):
+    """Qualify the exact failed forecast publication, never a rewritten summary."""
+    from . import stage_evidence as evidence
+    path=config.paths['results']/'calibration.json'
+    reference=file_reference(path)
+    measured=json.loads(path.read_text())
+    verify_record(measured)
+    reason='Smallest permitted scale cannot fit remaining allocations and reserve'
+    state=ledger.snapshot()
+    parents=[a for a in state['attempts'].values() if a['stage']=='G2' and a['status']=='failed'
+             and a.get('measurements',{}).get('exception')==reason
+             and a.get('outputs',{}).get('calibration')==reference]
+    if (len(parents)!=1 or measured.get('status')!='completed'
+            or (measured.get('forecast') or {}).get('status')!='infeasible'
+            or measured['forecast'].get('stop_reason')!=reason):
+        raise StageBlocked('Saved calibration lacks the original failed forecast publication')
+    parent=parents[0]
+    failed=[]
+    for candidate in (config.paths['results']/'stages').glob('calibrate.failed-*.json'):
+        record=json.loads(candidate.read_text()); verify_record(record)
+        if record.get('attempt_ids',[])[-1:]==[parent['attempt_id']] and record.get('stop_reason')==reason:
+            failed.append((candidate,record))
+    if len(failed)!=1:
+        raise StageBlocked('Saved calibration requires its original failed invocation')
+    for aid in failed[0][1]['attempt_ids']:
+        if aid!=parent['attempt_id'] and state['attempts'][aid]['status']!='completed':
+            raise StageBlocked('Saved calibration has unsuccessful prerequisite work')
+    proofs=[]
+    for candidate in config.paths['results'].glob('correctness*.json'):
+        proof=json.loads(candidate.read_text()); verify_record(proof)
+        previous={**inputs,'correctness':proof['output_sha256']}
+        if measured['input_sha256']==canonical_sha256(previous):
+            proofs.append((candidate,proof))
+    if not proofs:
+        raise StageBlocked('Original calibration G1 evidence is missing')
+    proof_path,proof=proofs[0]
+    if (proof.get('status')!='completed' or proof.get('returncode')!=0
+            or not proof.get('command_attempt_ids')
+            or proof['input_sha256']!=canonical_sha256(proof['inputs'])
+            or any(state['attempts'][a]['stage']!='G1' or state['attempts'][a]['status']!='completed'
+                   for a in proof['attempt_ids'])
+            or any(state['attempts'][a].get('outputs',{}).get('returncode')!=0
+                   or state['attempts'][a]['outputs'].get('command')!=proof['command']
+                   for a in proof['command_attempt_ids'])):
+        raise StageBlocked('Original calibration G1 proof is unsuccessful or unbound')
+    current=evidence.correctness_inputs(config)
+    if any(proof['inputs'].get(key)!=current[key] for key in ('config','environment','environment_lock')):
+        raise StageBlocked('Original scientific settings or environment changed')
+    scientific=('data.py','embed.py','models.py','metrics.py','protocol.py','workload.py')
+    if any(not proof['inputs']['code'].get('src/signed_study/'+name)
+           or proof['inputs']['code']['src/signed_study/'+name]!=current['code'].get('src/signed_study/'+name)
+           for name in scientific):
+        raise StageBlocked('Measured scientific implementation changed; remeasurement is required')
+    if measured.get('policy')!=config_record(resolved):
+        raise StageBlocked('Saved calibration scientific policy changed')
+    users=select_calibration_users(list(store.development))
+    probes=sorted(metadata,key=lambda i:hashlib.sha256(f'signed-study:item:{i}'.encode()).hexdigest())[:128]
+    if (measured.get('calibration_user_ids')!=users or measured.get('probe_item_ids')!=probes
+            or measured.get('repeat_item_ids')!=probes[:32] or measured.get('catalog_items')!=len(metadata)
+            or measured.get('repeatability',{}).get('accepted') is not True
+            or measured.get('chunk_invariance') is not True or measured.get('repair_decisions')
+            or measured.get('memory_bound') is not False
+            or measured.get('prototype_cap_user_fraction',1)>resolved.prototype['cap_hit_inspection_fraction']):
+        raise StageBlocked('Saved calibration has unresolved numerical, sampling or memory evidence')
+    workload_reference=parent['outputs']['attempts']; verify_reference(workload_reference)
+    workload_path=Path(workload_reference['path'])
+    workload=json.loads(workload_path.read_text())
+    entries=calibration_entries(resolved)
+    original_inputs=dict(episodes=episode_store_digest(store),user_ids=users,entries=[e.id for e in entries],
+                         numerical_checks=True,timing_only=False)
+    digest=canonical_sha256(original_inputs)
+    work=workload['measurements']
+    if (workload.get('schema_version')!=1 or workload.get('input_sha256')!=digest
+            or workload.get('output_sha256')!=canonical_sha256(work)
+            or any(measured.get(k)!=work.get(k) for k in ('status','attempts','actual_evaluations',
+                'user_measurements','repair_decisions','chunk_invariance','prototype_cap_user_fraction','memory_bound'))):
+        raise StageBlocked('Saved calibration workload does not match its original publication')
+    chunks=set(resolved.numerics['score_chunk_sizes_check'])|{resolved.numerics['score_chunk_size']}
+    expected={(uid,e.id,chunk) for uid in users for e in entries for chunk in chunks}
+    rows=work['attempts']
+    if (work['actual_evaluations']!=len(expected) or len(rows)!=len(expected)
+            or measured.get('reserved_evaluations')!=len(expected) or parent['evaluations']!=len(expected)
+            or {r['evaluation_index'] for r in rows}!=set(range(len(rows)))
+            or {(r['user_id'],r['configuration_id'],r['chunk_size']) for r in rows}!=expected
+            or any(r['status']!='completed' or r.get('exception')
+                   or r['kind']!=('fit_and_score' if r['chunk_size']==resolved.numerics['score_chunk_size'] else 'score_repeat')
+                   or (r['kind']=='score_repeat' and r.get('accepted') is not True)
+                   or (r['kind']=='fit_and_score' and r.get('diagnostics',{}).get('status')!='ok') for r in rows)):
+        raise StageBlocked('Saved calibration evaluations are incomplete or numerically rejected')
+    pairs={(u,e.id) for u in users for e in entries}
+    timings=measured['user_measurements']
+    if (len(timings)!=len(pairs) or {(r['user_id'],r['configuration_id']) for r in timings}!=pairs
+            or any(r.get('diagnostics',{}).get('status')!='ok'
+                   or set(r['score_measurements'])!={str(c) for c in chunks}
+                   or any(v.get('numerical_accepted') is not True for v in r['score_measurements'].values()) for r in timings)):
+        raise StageBlocked('Saved calibration numerical timing coverage is incomplete')
+    journal=workload_path.with_suffix('.jsonl'); completed={}; started=set()
+    for line in journal.read_text().splitlines():
+        event=json.loads(line); verify_record(event)
+        if event.get('input_sha256')!=digest: raise StageBlocked('Saved calibration journal inputs changed')
+        row=event['attempt']; index=row['evaluation_index']
+        if row['status']=='started':
+            if index in started: raise StageBlocked('Duplicate saved calibration journal start')
+            started.add(index)
+        elif row['status']=='completed' and index in started:
+            completed[index]=row
+        else: raise StageBlocked('Saved calibration journal has incomplete or failed work')
+    # Repeated-score write duration is measured after its final durable journal.
+    def journal_value(row):
+        return {k:v for k,v in row.items() if not (k=='write_seconds' and row['kind']=='score_repeat')}
+    if (started!=set(range(len(rows))) or set(completed)!=started
+            or any(journal_value(completed[r['evaluation_index']])!=journal_value(r) for r in rows)):
+        raise StageBlocked('Saved calibration journal differs from completed workload')
+    provenance=dict(parent_attempt_id=parent['attempt_id'],parent_status=parent['status'],
+                    parent_publication=reference,workload=workload_reference,journal=file_reference(journal),
+                    failed_invocation=file_reference(failed[0][0]),original_correctness=file_reference(proof_path),
+                    original_input_sha256=measured['input_sha256'],original_forecast=measured['forecast'],
+                    reused_evaluations=len(rows),new_evaluations=0)
+    return measured,provenance,workload_path,journal
+
+
+def _resume_calibration(config,ledger,attempts):
+    if not results_first(ledger.snapshot()):
+        raise StageBlocked('Saved calibration adoption requires explicit results-first policy')
+    with ledger.work('G2',0,0) as aid:
+        attempts.append(aid)
+        inputs,resolved,_,_,metadata,expected,store=_calibration_context(config,ledger)
+        if (config.paths['results']/'stages'/'calibrate.json').exists():
+            return _prerequisite(config,'calibrate',ledger,inputs)
+        cache_path=resolved.paths['cache']/'embeddings'
+        load_embedding_cache(cache_path,expected)
+        measured,provenance,workload,journal=_saved_calibration(config,ledger,inputs,resolved,store,metadata)
+        forecast=forecast_scale(measured,store,ledger)
+        if forecast['status']!='feasible': raise StageBlocked(forecast['stop_reason'])
+        policy=forecast['policy']
+        resolved=replace(resolved,encoder={**resolved.encoder,'batch_size':policy['embedding_batch_size']},
+                         numerics={**resolved.numerics,'score_chunk_size':policy['score_chunk_size']})
+        adopted={**measured,'input_sha256':canonical_sha256(inputs),'forecast':forecast,
+                 'reused_measurement_provenance':provenance,'execution_policy':ledger.snapshot()['execution_policy']}
+        adopted.pop('output_sha256')
+        adopted['output_sha256']=canonical_sha256(adopted)
+        path=config.paths['results']/f'calibration-resumed-{aid}.json'
+        atomic_write_json(path,adopted)
+        policy_path=config.paths['results']/'calibration_config.json'
+        atomic_write_json(policy_path,config_record(resolved))
+        files={'calibration':path,'policy':policy_path,'attempts':workload,'attempt_journal':journal,
+               **{f'cache_{name}':cache_path/name for name in ('manifest.json','vectors.npy','item_ids.npy')},
+               'original_calibration':Path(provenance['parent_publication']['path']),
+               'original_correctness':Path(provenance['original_correctness']['path'])}
+        return save_stage(config,'calibrate',inputs,files,attempts,forecast=forecast,
+                          reused_measurement_provenance=provenance)
+
+
 def _smoke(config,ledger,attempts):
     with ledger.work('G0',0,0) as check:
         attempts.append(check)
@@ -291,7 +455,7 @@ def _develop(config,ledger,attempts):
         inputs={'calibrate':calibration['output_sha256'],'smoke':smoke['output_sha256']}
         if (config.paths['results']/'stages'/'develop.json').exists():
             return _prerequisite(config,'develop',ledger,inputs)
-        measurements=_read(config,'calibration.json')
+        measurements=calibration_measurements(config,calibration)
     result=execute_development(resolved,ledger,store,cache,measurements,attempt_ids=attempts)
     files={'development':config.paths['results']/result['artifact_name']}
     for i,batch in enumerate(result['batches']):
@@ -308,7 +472,8 @@ def _develop(config,ledger,attempts):
 
 def run_stage(stage,config,ledger):
     """Run one ordered gate; incomplete prerequisites are explicit failures."""
-    dispatch={'acquire':_acquire,'audit':_audit,'calibrate':_calibrate,'smoke':_smoke,'develop':_develop}
+    dispatch={'acquire':_acquire,'audit':_audit,'calibrate':_calibrate,
+              'resume-calibration':_resume_calibration,'smoke':_smoke,'develop':_develop}
     if stage not in dispatch:
         raise ValueError(f'Unknown implemented stage: {stage}')
     attempts=[]

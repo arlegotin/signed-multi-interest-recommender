@@ -4,6 +4,7 @@ import math
 
 from .data import Episode, EpisodeStore
 from .models import initial_configurations
+from .budget import results_first, time_forecast_fits
 
 
 def planned_comparison_schedule():
@@ -139,6 +140,8 @@ def forecast_scale(measurements: dict, cohort: EpisodeStore, ledger) -> dict:
     confirm = sorted(cohort.confirmation, key=lambda e: user_digest(e.history.user_id))
     scales = ([list(config.calibration['fallback_scale_pair'])] if cohort.audit['dataset'] == 'ml-100k'
               else [list(p) for p in config.calibration['primary_scale_pairs']])
+    if results_first(state):
+        scales = scales[:1]  # The authorized full cohort cannot shrink for elapsed time.
     if cohort.audit['dataset'] not in ('ml-1m', 'ml-100k'):
         raise ValueError('Production forecast requires official dataset provenance')
     caps = config.resources
@@ -149,6 +152,7 @@ def forecast_scale(measurements: dict, cohort: EpisodeStore, ledger) -> dict:
         stage_limits = caps['stage_seconds']  # Legacy synthetic ledger fixtures.
     margin = caps['safety_multiplier']
     result = dict(status='infeasible', scale=None, safety_multiplier=margin, tested_scales=[],
+                  execution_policy=state.get('execution_policy', {'mode':'bounded'}),
                   cost_chunk_size=config.numerics['score_chunk_size'],
                   adjustments=[], policy=dict(embedding_batch_size=config.encoder['batch_size'],
                   score_chunk_size=config.numerics['score_chunk_size'], blas_threads=config.timing['blas_threads'],
@@ -158,6 +162,9 @@ def forecast_scale(measurements: dict, cohort: EpisodeStore, ledger) -> dict:
                   support_model='upper observed size-bin envelope plus measured nonnegative slope',
                   stop_reason='Smallest permitted scale cannot fit remaining allocations and reserve')
     fixed = measurements.get('fixed_seconds', 0.)
+    for value in (fixed, measurements.get('optional_seconds', 0.)):
+        if type(value) not in (int,float) or not math.isfinite(value) or value < 0:
+            raise ValueError('Invalid calibration duration')
     catalog_items=measurements.get('catalog_items',3883 if cohort.audit['dataset']=='ml-1m' else 1682)
     if type(catalog_items) is not int or catalog_items<=0:
         raise ValueError('Measured catalog size must be positive')
@@ -178,9 +185,7 @@ def forecast_scale(measurements: dict, cohort: EpisodeStore, ledger) -> dict:
         evaluations = d*92 + c*comparison_entries + 624 + timing_evaluations + numerical_evaluations + (4200 if optional else 0)
         fits = (d <= len(dev) and c <= len(confirm)
                 and state['attempted_evaluations']+evaluations <= caps['evaluation_limit']
-                and all(state['stage_seconds'][s]+margin*t <= stage_limits[s] for s,t in seconds.items())
-                and state['experimental_seconds']+margin*sum(seconds.values()) <=
-                    caps['experimental_seconds']-caps['report_reserve_seconds'])
+                and time_forecast_fits(state,config,seconds))
         return fits, seconds, evaluations
 
     optional = measurements.get('optional_seconds', 0.)

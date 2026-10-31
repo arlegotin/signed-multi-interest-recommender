@@ -8,6 +8,8 @@ _COMMANDS = {
     "acquire": "G0: requires compatible inspect evidence; acquire fixed data/model manifests; no comparison outcomes.",
     "audit": "G0: requires acquisition; validate data and eligibility; auditor-only outcome access.",
     "calibrate": "G2: requires audit and current recorded G1 full-suite evidence; probe, verify complete cache, then development outcomes only.",
+    "results-first": "Adopt the explicit pre-freeze results-first execution policy.",
+    "resume-calibration": "G2: verify and adopt saved calibration without new fits or encoding.",
     "smoke": "G3: requires successful calibration and complete verified cache; exactly 8 development users, no confirmation outcomes.",
     "develop": "G3: requires calibrated cache and forecast; development outcomes only.",
     "freeze": "G3: requires validated development and clean committed source; lock protocol.",
@@ -32,6 +34,8 @@ def main(argv=None):
             command.add_argument("--config", default="config/study.json")
         if name == "smoke":
             command.add_argument("--development-users", type=int, default=8)
+        if name == 'results-first':
+            command.add_argument('--reason',required=True)
     args = parser.parse_args(argv)
     if args.command is None:
         parser.print_help()
@@ -52,7 +56,7 @@ def main(argv=None):
                           "target_compatible": evidence["target_compatible"],
                           "blockers": evidence["blockers"]}, sort_keys=True))
         return 0 if evidence["target_compatible"] else 2
-    if args.command in ('acquire', 'audit', 'calibrate', 'smoke', 'develop'):
+    if args.command in ('acquire', 'audit', 'calibrate', 'resume-calibration', 'results-first', 'smoke', 'develop'):
         from pathlib import Path
         import json
         from .budget import BudgetExceeded, Ledger, LedgerBusy
@@ -65,7 +69,11 @@ def main(argv=None):
         try:
             config = load_config(Path(args.config))
             ledger = Ledger(config.paths['results'] / 'budget_ledger.jsonl', config)
-            result = run_stage(args.command, config, ledger)
+            if args.command == 'results-first':
+                event_id=ledger.adopt_results_first(args.reason)
+                result=dict(status='completed',event_id=event_id,execution_policy=ledger.snapshot()['execution_policy'])
+            else:
+                result = run_stage(args.command, config, ledger)
         except (ValueError, BudgetExceeded, LedgerBusy) as error:
             parser.exit(2, f'{args.command} blocked: {error}\n')
         finally:

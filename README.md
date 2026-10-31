@@ -1,19 +1,21 @@
 # Signed multi-interest recommendation study
 
-This package implements the bounded CPU study in [the blueprint](docs/blueprint.md).
+This package implements the CPU study in [the blueprint](docs/blueprint.md).
 All ordered stage commands and saved-evidence reports are implemented. Synthetic
 test results do not imply that a real experiment has occurred.
 
-The native run stopped at the **G2 declared pipeline forecast gate**. Acquisition,
+The original native run stopped at the **G2 declared pipeline forecast gate**. Acquisition,
 audit, current correctness and calibration measurements ran; no cohort was frozen
 and recommendation efficacy remains untested. Measured full-catalog encoding was
 11.19 seconds, 352 fits took 1.33 seconds, and canonical candidate scoring plus
 metrics took 0.50 seconds. A conservative pipeline-overhead forecast blocked all
-permitted schedules. Read [the aggregate outcome](docs/study-outcome.md) and
-[the chronological execution decisions](docs/study-decisions.md). The commands
-below describe the gated protocol, not authorization to resume this stopped run;
-both material repair cycles are used. Regenerate its report from saved evidence
-using the reporting recipe below.
+permitted schedules. This is historical stop evidence, not a scientific result.
+On 31 October the user authorized continuation to research results with elapsed
+time limits and the ordinary material repair quota made advisory. The scientific
+protocol, full primary cohort (418 development / 1776 confirmation), evaluation,
+memory, disk and single-worker constraints remain fixed. Read
+[the aggregate historical outcome](docs/study-outcome.md) and
+[the execution decisions](docs/study-decisions.md).
 
 Recreate the native Python 3.11/3.12 environment from the repository root, using
 the platform/Python in saved environment evidence and the exact package pins:
@@ -52,7 +54,16 @@ target stages. Acquisition uses MovieLens 1M and the fixed MiniLM encoder. The
 blueprint's access-only rule, with explicit separate scope; disappointing
 results, incompatible encoder or inadequate resources do not authorize it.
 
-Before calibration, record **current full-suite** G1 evidence:
+Before calibration, record **current full-suite** G1 evidence.
+
+For the authorized continuation, first adopt its durable policy, then run the
+G1 recipe below. Adoption uses the existing ledger and cannot occur after freeze
+or confirmation exposure. Existing ledgers remain bounded unless explicitly amended.
+
+```sh
+python -m signed_study results-first --config config/study-pinned.json \
+  --reason '31 October user authorization: continue to scientific results; elapsed limits advisory'
+```
 
 ```sh
 python - <<'PY'
@@ -68,7 +79,7 @@ finally:
     ledger.close()
 raise SystemExit(0 if result['status'] == 'completed' else 2)
 PY
-python -m signed_study calibrate --config config/study-pinned.json
+python -m signed_study resume-calibration --config config/study-pinned.json
 python -m signed_study smoke --config config/study-pinned.json --development-users 8
 python -m signed_study develop --config config/study-pinned.json
 python -m signed_study freeze --config config/study-pinned.json
@@ -83,9 +94,21 @@ For independent development/test commands use that wrapper once with stage G1.
 source/test bytes, config, environment and package lock. Record it again after
 bound inputs change; an older successful pytest entry cannot open G2.
 Bootstrap accounting was already imported once; never import it again or reset
-clocks. Effective stage allocations/reallocations come from the permanent ledger,
-including failures, not config defaults. The 240 experimental minutes, 45 setup
-minutes and protected 30 reporting minutes remain separate.
+clocks. Effective stage allocations/reallocations and execution policy come from
+the permanent ledger, including failures. Original 240 experimental minutes,
+45 setup minutes, stage allocations, 1.5 forecast multiplier and 30 reporting
+minutes are historical planning estimates and advisory under `results_first`.
+All elapsed usage and repair cycles remain counted. Evaluation, memory and disk
+limits remain enforced, with no paid or remote computation.
+
+`resume-calibration` verifies the original failed terminal publication, original
+G1 and unchanged scientific implementation/settings, completed workload journal,
+numerical checks and full cache. It writes `calibration-resumed-<id>.json` and a
+new successful calibration stage bound to current G1, with zero new evaluations.
+It preserves `results/calibration.json` at its original path and hash, the failed
+attempt and the archived old correctness bytes. Downstream stages resolve the
+calibration artifact from that completed stage. For a new study without saved
+measurements, use `calibrate` in place of `resume-calibration`.
 
 Stages return status, hashed artifacts, attempt IDs and stop reasons. Unmet
 prerequisites exit nonzero. Matching completed work is verified and reused;
@@ -94,8 +117,9 @@ complete-cache validation, policy and cohort IDs. Development selects global
 settings from bounded grids (78 initial, at most 14 additions). Durable journals
 retain every started/failed evaluation. Reservations are distinct from actual
 executed user/configuration attempts. Failed methods are not silently retried.
-Global pre-freeze repairs require recorded evidence and obey the two-cycle,
-20-minute repair cap within total time. Freeze requires clean committed source,
+Global pre-freeze repairs require recorded evidence and review; ordinary material
+cycles and their elapsed costs are advisory under `results_first`. Scientific
+solver/prototype iteration and repair rules remain fixed. Freeze requires clean committed source,
 current G1 proof and complete prerequisite provenance.
 
 Confirmation opens outcomes only after verifying the immutable canonical lock,
@@ -129,9 +153,12 @@ work; the CLI owns G6. Equal saved evidence yields equal scientific tables and
 figures. Repeated CLI admissions extend the ledger, so cost snapshots carry an
 as-of ledger identity and need not remain byte-identical.
 
-For this accepted G2 early stop, the generic CLI has known frozen-cohort,
+For reproducing the historical G2 early stop only, the generic CLI has known frozen-cohort,
 forecast-detail and dominant-cost wording limitations. The complete reproduction
-recipe requires the tracked saved-evidence packaging wrapper as a second step:
+recipe requires the tracked saved-evidence packaging wrapper as a second step.
+Preserve original reports and tables in a versioned historical directory before
+rendering continuation results. The historical wrapper below describes the first
+stop and must not replace the active continuation report:
 
 ```sh
 .venv/bin/python -m signed_study report --results results

@@ -47,6 +47,31 @@ class LedgerBusy(RuntimeError):
     """Another writer owns this study's workload lock."""
 
 
+def results_first(state):
+    """Legacy snapshots without an explicit amendment retain bounded behavior."""
+    return state.get('execution_policy', {}).get('mode') == 'results_first'
+
+
+def time_forecast_fits(state, config, seconds):
+    """Validate measured forecasts, applying elapsed ceilings only when bounded."""
+    if any(type(value) not in (int, float) or not math.isfinite(value) or value < 0
+           for value in seconds.values()):
+        raise ValueError('Forecast durations must be finite and nonnegative')
+    if results_first(state):
+        return True
+    caps = config.resources
+    limits = state.get('stage_limits')
+    if limits is None:
+        if state.get('reallocations'):
+            raise ValueError('Transfer history requires effective stage limits')
+        limits = caps['stage_seconds']
+    margin = caps['safety_multiplier']
+    return (all(state['stage_seconds'][stage] + margin * value <= limits[stage]
+                for stage, value in seconds.items())
+            and state['experimental_seconds'] + margin * sum(seconds.values()) <=
+                caps['experimental_seconds'] - caps['report_reserve_seconds'])
+
+
 def atomic_write_json(path: Path, payload: dict) -> None:
     """Replace a complete JSON artifact atomically; preserve old output on error."""
     encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False, allow_nan=False) + '\n'
@@ -350,6 +375,7 @@ class Ledger:
                      stage_limits=dict(self.config.resources['stage_seconds']), reallocations=[],
                      baseline_disk_bytes=0, peak_project_disk_bytes=0, initial_free_disk_bytes=None, resources_sha256=None,
                      report_reserve_seconds=self.config.resources['report_reserve_seconds'],
+                     execution_policy={'mode': 'bounded'},
                      attempts={}, unfinished_attempts={}, bootstrap_ids=[], events=rows)
         for row in rows:
             event = row['event']
@@ -371,6 +397,10 @@ class Ledger:
             elif event == 'reallocate':
                 state['stage_limits'] = self._reallocated_limits(state, row)
                 state['reallocations'].append(dict(row))
+            elif event == 'execution_policy':
+                self._validate_policy(state, row)
+                state['execution_policy'] = {key: row[key] for key in
+                    ('mode', 'event_id', 'reason', 'recorded_at', 'resources_sha256')}
             sample = row.get('measurements', {})
             state['peak_rss_bytes'] = max(state['peak_rss_bytes'], sample.get('rss_bytes', 0))
             state['peak_project_disk_bytes'] = max(state['peak_project_disk_bytes'], sample.get('project_disk_bytes', 0))
@@ -395,6 +425,51 @@ class Ledger:
     def snapshot(self):
         rows, _ = _read_events(self.path)
         return self._state(rows)
+
+    @staticmethod
+    def _validate_policy(state, row):
+        fields = {'schema_version', 'event', 'recorded_at', 'event_id',
+                  'mode', 'reason', 'resources_sha256'}
+        if (set(row) != fields or type(row['schema_version']) is not int
+                or row['schema_version'] != 1 or row['event'] != 'execution_policy'
+                or row['mode'] != 'results_first'
+                or not isinstance(row['event_id'], str) or not row['event_id'].strip()
+                or type(row['recorded_at']) not in (int, float)
+                or not math.isfinite(row['recorded_at'])
+                or not isinstance(row['reason'], str) or not row['reason'].strip()
+                or not state['resources_sha256'] or row['resources_sha256'] != state['resources_sha256']):
+            raise ValueError('Invalid results-first execution policy record')
+        if results_first(state):
+            raise ValueError('Duplicate execution policy amendment')
+        if any(a['status'] == 'unfinished' or a['stage'] in ('G4', 'G5')
+               or a.get('outputs', {}).get('protocol_lock') for a in state['attempts'].values()):
+            raise ValueError('Policy amendment requires pre-freeze, unexposed, idle accounting')
+
+    def adopt_results_first(self, reason: str) -> str:
+        """Append the explicit pre-freeze amendment without changing any usage/cap."""
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError('Results-first adoption requires a nonempty reason')
+        with self._critical():
+            self._acquire()
+            try:
+                self._initialize()
+                state = self._state(self._cached)
+                root = self.config.paths['results']
+                if any((root / name).exists() for name in ('protocol.lock.json', 'protocol.lock.sha256',
+                        'confirmation.exposure.json', 'confirmation.events.jsonl')) or any(
+                        a['stage'] in ('G4','G5') or a.get('outputs',{}).get('protocol_lock')
+                        for a in state['attempts'].values()):
+                    raise ValueError('Policy adoption is prohibited after freeze or confirmation exposure')
+                if results_first(state):
+                    return state['execution_policy']['event_id']
+                fields = dict(event_id=str(uuid.uuid4()), mode='results_first', reason=reason,
+                              resources_sha256=state['resources_sha256'])
+                self._validate_policy(state, dict(schema_version=1, event='execution_policy',
+                                                  recorded_at=self.wall_clock(), **fields))
+                self._append('execution_policy', **fields)
+                return fields['event_id']
+            finally:
+                self._release()
 
     @staticmethod
     def _reallocated_limits(state, row):
@@ -471,6 +546,8 @@ class Ledger:
                 raise BudgetExceeded('Insufficient available-memory headroom')
         if state['attempted_evaluations'] + evaluations > caps['evaluation_limit']:
             raise BudgetExceeded('Attempted evaluations cap exceeded')
+        if results_first(state):
+            return  # Durations and ordinary material repair counts remain recorded.
         if stage == 'setup':
             if state['setup_seconds'] + projected > caps['setup_seconds']:
                 raise BudgetExceeded('Separate setup time cap exceeded')
